@@ -34,6 +34,9 @@ setup(
         "numba",
         "segyio",
         "ipython",
+        "zarr<3",
+        "numcodecs",
+        "tqdm",
     ],
     extras_require={
         "gpu": [

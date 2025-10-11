@@ -38,10 +38,20 @@ from .plotting import (
     plot_seismic_image_interactive
 )
 
+from .zarr_utils import (
+    segy_directory_to_zarr,
+    load_zarr_amplitude,
+    load_zarr_datasets,
+    preview_zarr_headers,
+    preview_segy_headers,
+    extract_zarr_text_headers,
+    extract_zarr_binary_headers,
+)
+
 __all__ = [
     # I/O
     "read_data", "write_data", "import_npy_mmap", "import_parquet_file", "get_text_header", "get_trace_header", "get_trace_data",
-    "get_binary_header", "store_geometry_as_parquet",
+    "get_binary_header", "store_geometry_as_parquet", "segy_directory_to_zarr", "load_zarr_amplitude", "load_zarr_datasets", "preview_zarr_headers", "preview_segy_headers", "extract_zarr_text_headers", "extract_zarr_binary_headers",
 
     # Processing
     "resample", "stack_data_along_axis", "mute_data", "trim_samples", "sort",

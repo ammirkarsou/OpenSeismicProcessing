@@ -7,4 +7,7 @@ pylops
 numba
 segyio
 ipython
+zarr<3
+numcodecs
+tqdm
 cupy>=12.0

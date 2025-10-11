@@ -363,14 +363,16 @@ def write_data(context, file_folder, file_name, format="binary"):
         return None
 
     try:
-        # Determine shape string for filename
-        if data.ndim == 1:
-            shape_str = f"_{len(data)}Samples"
-        elif data.ndim == 2:
-            shape_str = f"_{data.shape[1]}x{data.shape[0]}Samples"
-        else:
-            print(f"❌ Error: Only 1D or 2D arrays are supported. Got shape: {data.shape}")
-            return None
+        shape_str = ""
+        if format == "binary":
+            # Determine shape string for filename when writing binary files.
+            if data.ndim == 1:
+                shape_str = f"_{len(data)}Samples"
+            elif data.ndim == 2:
+                shape_str = f"_{data.shape[1]}x{data.shape[0]}Samples"
+            else:
+                print(f"❌ Error: Only 1D or 2D arrays are supported for binary output. Got shape: {data.shape}")
+                return None
 
         # Determine full file path
         ext = ".bin" if format == "binary" else ".npy"
