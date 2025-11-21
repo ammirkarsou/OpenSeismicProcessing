@@ -1,1 +1,1 @@
-recursive-include src/golem/lib *.so
+recursive-include src/openseismicprocessing/lib *.so

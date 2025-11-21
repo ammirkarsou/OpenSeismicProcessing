@@ -1,6 +1,6 @@
-# Golem Seismic Processing
+# Open Seismic Processing
 
-Seismic processing utilities for reading SEG-Y data, running common preprocessing pipelines, and visualising seismic volumes. The package bundles a CUDA-based migration backend (`libEikonal.so`) so you can install and import `golem` directly from a clone.
+Seismic processing utilities for reading SEG-Y data, running common preprocessing pipelines, and visualising seismic volumes. The package bundles a CUDA-based migration backend (`libEikonal.so`) so you can install and import `openseismicprocessing` directly from a clone.
 
 ## Requirements
 
@@ -12,14 +12,14 @@ Seismic processing utilities for reading SEG-Y data, running common preprocessin
 
 ```bash
 git clone <repository-url>
-cd Golem\ Seismic\ Processing
+cd Open\ Seismic\ Processing
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install --upgrade pip setuptools wheel
 pip install .
 ```
 
-This installs the `golem` package together with its runtime dependencies:
+This installs the `openseismicprocessing` package together with its runtime dependencies:
 
 - `numpy`, `pandas`, `scipy`, `matplotlib`
 - `opencv-python`, `pylops`, `numba`
@@ -29,9 +29,9 @@ This installs the `golem` package together with its runtime dependencies:
 
 ```bash
 python - <<'PY'
-import golem
-print("golem version:", golem.__version__)
-from golem import read_data  # any function exposed via SignalProcessing
+import openseismicprocessing
+print("openseismicprocessing version:", openseismicprocessing.__version__)
+from openseismicprocessing import read_data  # any function exposed via SignalProcessing
 print("Import OK")
 PY
 ```
@@ -59,6 +59,8 @@ Some migration utilities rely on NVIDIA DALI in addition to CuPy. Install the ex
 
 ```bash
 pip install '.[gpu]'
+# or, from a published wheel:
+pip install 'openseismicprocessing[gpu]'
 ```
 
 Notes:
@@ -70,18 +72,18 @@ GPU helpers fall back to informative `ImportError`s when the GPU stack is unavai
 
 ## Rebuilding the CUDA shared library (optional)
 
-The prebuilt `libEikonal.so` is bundled under `src/golem/lib/`. If you need to rebuild it:
+The prebuilt `libEikonal.so` is bundled under `src/openseismicprocessing/lib/`. If you need to rebuild it:
 
 1. Install the CUDA toolkit and ensure `nvcc` is on your `PATH`.
 2. From the repository root, run the command recorded in `lib/so_compiling_command.txt`, adjusting paths as needed.
-3. Copy the resulting `libEikonal.so` into `src/golem/lib/`.
+3. Copy the resulting `libEikonal.so` into `src/openseismicprocessing/lib/`.
 
 ```bash
 # Example (edit CUDA version/flags to match your setup)
 cd lib
 /usr/local/cuda-12.8/bin/nvcc -use_fast_math -Xcompiler -fPIC -shared \
     -o libEikonal.so eikonal2D.cu -lnppig
-cp libEikonal.so ../src/golem/lib/
+cp libEikonal.so ../src/openseismicprocessing/lib/
 ```
 
 ## Building distributable artifacts
@@ -96,8 +98,8 @@ The resulting wheel and sdist will include the shared library because of the `MA
 
 ## Project layout
 
-- `src/golem/` – main package modules
-- `src/golem/lib/` – bundled shared library and stub `__init__.py`
+- `src/openseismicprocessing/` – main package modules
+- `src/openseismicprocessing/lib/` – bundled shared library and stub `__init__.py`
 - `examples/` – usage examples and scripts
 - `lib/` – CUDA source and build notes (not imported by the package)
 

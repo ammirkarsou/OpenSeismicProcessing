@@ -250,7 +250,7 @@ extern "C" {
         
         // Loop over traces
         #pragma unroll 9
-        for (int j = 0; j < ntraces-1; j++) {
+        for (int j = 0; j < ntraces; j++) {
             float cdp_val = cdp[j];    // effective CDP for trace j
             float h = offsets[j] * 0.5f; // half offset for trace j
             // float doffset = fabsf(offsets[j+1]-offsets[j]);

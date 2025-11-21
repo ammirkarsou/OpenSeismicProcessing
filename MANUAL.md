@@ -1,10 +1,10 @@
-# Golem User Manual
+# Open Seismic Processing User Manual
 
-This guide lists the handful of functions you will interact with day to day when using Golem for seismic-processing pipelines. Everything else in the codebase supports these entry points.
+This guide lists the handful of functions you will interact with day to day when using Open Seismic Processing for seismic-processing pipelines. Everything else in the codebase supports these entry points.
 
 ---
 
-## 1. Project & Dataset Management (``golem.catalog``)
+## 1. Project & Dataset Management (``openseismicprocessing.catalog``)
 
 | Function | Use Case |
 | --- | --- |
@@ -23,7 +23,7 @@ This guide lists the handful of functions you will interact with day to day when
 
 | Function | Use Case |
 | --- | --- |
-| `build_steps(step_specs)` (from `golem.catalog.steps`) | Convert declarative specs such as `{ "name": "write_data", ... }` into pipeline steps. Use this to define your “boxes” in code or the future UI. |
+| `build_steps(step_specs)` (from `openseismicprocessing.catalog.steps`) | Convert declarative specs such as `{ "name": "write_data", ... }` into pipeline steps. Use this to define your “boxes” in code or the future UI. |
 | `catalog.run_simple_pipeline(project_name, pipeline_steps, output_context_key, output_dataset_name=None, output_filetype="unknown", input_datasets=None)` | Execute the steps, track the run in the catalog, and automatically register the output dataset. |
 
 ### Dataset placeholders inside step specs
@@ -36,27 +36,31 @@ The pipeline `context` collects outputs you name via `"output": "data"` (for exa
 
 ---
 
-## 3. SEG-Y → Zarr Workflow (``golem``)
+## 3. SEG-Y → Zarr Workflow (``openseismicprocessing``)
 
 These functions let you explore SEG-Y headers, convert data to Zarr, and read it lazily.
 
 | Function | Description |
 | --- | --- |
-| `golem.preview_segy_headers(context, segy_paths, headers=None, n_traces=1000)` | Return a Pandas DataFrame with stats (min/max/mean/std/unique) for every SEG-Y header. Use it to decide which headers to keep. |
-| `golem.segy_directory_to_zarr(context, segy_input, zarr_out, headers=None, chunk_trace=512)` | Convert one or many SEG-Y files into a Zarr store. Stores chosen headers as arrays and saves the original binary/text headers in Zarr metadata. |
-| `golem.preview_zarr_headers(context, zarr_store, headers=None, n_traces=1000)` | Inspect header behaviour inside an existing Zarr store; results (stats + optional figure) land in the context. |
-| `golem.load_zarr_datasets(context, zarr_store, headers=None, include_amplitude=True, output="zarr_data", eager=False)` | Open the Zarr arrays lazily. Pass a catalog dataset (the dict from `get_dataset`) or a direct path. Set `eager=True` only if you want NumPy copies. |
-| `golem.extract_zarr_text_headers(context, zarr_store)` | Fetch the SEG-Y text headers that were stored during conversion. |
-| `golem.extract_zarr_binary_headers(context, zarr_store)` | Fetch the SEG-Y binary headers stored in metadata. |
+| `openseismicprocessing.preview_segy_headers(context, segy_paths, headers=None, n_traces=1000)` | Return a Pandas DataFrame with stats (min/max/mean/std/unique) for every SEG-Y header. Use it to decide which headers to keep. |
+| `openseismicprocessing.segy_directory_to_zarr(context, segy_input, zarr_out, headers=None, chunk_trace=512)` | Convert one or many SEG-Y files into a Zarr store. Stores chosen headers as arrays and saves the original binary/text headers in Zarr metadata. |
+| `openseismicprocessing.preview_zarr_headers(context, zarr_store, headers=None, n_traces=1000)` | Inspect header behaviour inside an existing Zarr store; results (stats + optional figure) land in the context. |
+| `openseismicprocessing.load_zarr_datasets(context, zarr_store, headers=None, include_amplitude=True, output="zarr_data", eager=False)` | Open the Zarr arrays lazily. Pass a catalog dataset (the dict from `get_dataset`) or a direct path. Set `eager=True` only if you want NumPy copies. |
+| `openseismicprocessing.slice_zarr_by_header(context, zarr_store, header, min_value=None, max_value=None, ...)` | Produce a trace subset based on header filters (e.g., `offset` range). Returns a dict of Zarr (or NumPy) arrays plus the selected indices. |
+| `openseismicprocessing.slice_zarr_by_expression(context, zarr_store, "(offset >= 0) & (offset <= 100)")` | Subset traces using a NumPy-style boolean expression over header arrays. |
+| `openseismicprocessing.scale_zarr_coordinate_units(context, zarr_store, XY_headers=(...), XY_scaler=100.)` | Scale coordinate/elevation header arrays in place inside the Zarr store (mirrors `scale_coordinate_units` for DataFrames). |
+| `openseismicprocessing.create_zarr_header(context, zarr_store, "SourceX - GroupX", output_header="DX")` | Compute a new header from an expression and store it as a dataset inside the Zarr store. |
+| `openseismicprocessing.extract_zarr_text_headers(context, zarr_store)` | Fetch the SEG-Y text headers that were stored during conversion. |
+| `openseismicprocessing.extract_zarr_binary_headers(context, zarr_store)` | Fetch the SEG-Y binary headers stored in metadata. |
 
 ---
 
-## 4. Basic I/O Helpers (``golem``)
+## 4. Basic I/O Helpers (``openseismicprocessing``)
 
 | Function | Description |
 | --- | --- |
-| `golem.get_trace_data(context, file_path, ignore_geometry=True)` | Load SEG-Y traces into memory (single file or directory). Useful for quick conversions. |
-| `golem.write_data(context, file_folder, file_name, format="npy")` | Save `context["data"]` as `.npy` or binary. Pipeline-friendly; pair it with `run_simple_pipeline` to catalogue the output. |
+| `openseismicprocessing.get_trace_data(context, file_path, ignore_geometry=True)` | Load SEG-Y traces into memory (single file or directory). Useful for quick conversions. |
+| `openseismicprocessing.write_data(context, file_folder, file_name, format="npy")` | Save `context["data"]` as `.npy` or binary. Pipeline-friendly; pair it with `run_simple_pipeline` to catalogue the output. |
 
 Most other functions in the repository are lower-level utilities behind these entry points and do not need to be called directly.
 
@@ -65,15 +69,15 @@ Most other functions in the repository are lower-level utilities behind these en
 ## 5. Typical Usage Snippet
 
 ```python
-from golem import catalog
-from golem.catalog.steps import build_steps
+from openseismicprocessing import catalog
+from openseismicprocessing.catalog.steps import build_steps
 
 # 1. Ensure project exists
 project_id = catalog.ensure_project("BP 2004", "/home/user/BP2004")
 
 # 2. Preview headers
-import golem
-df = golem.preview_segy_headers({}, "/home/user/BP2004/ShotGather")
+import openseismicprocessing
+df = openseismicprocessing.preview_segy_headers({}, "/home/user/BP2004/ShotGather")
 print(df.head())
 
 # 3. Convert to Zarr and register output
@@ -95,7 +99,7 @@ catalog.run_simple_pipeline(
 
 # 4. Load data lazily
 ctx = {}
-arrays = golem.load_zarr_datasets(ctx, catalog.get_dataset(project_id, "shotgather_zarr"))
+arrays = openseismicprocessing.load_zarr_datasets(ctx, catalog.get_dataset(project_id, "shotgather_zarr"))
 amplitude = arrays["amplitude"]      # still a Zarr array
 ```
 

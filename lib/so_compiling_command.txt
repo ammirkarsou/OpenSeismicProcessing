@@ -1,0 +1,1 @@
+/usr/local/cuda-12.8/bin/nvcc -use_fast_math -Xcompiler -fPIC -shared -o libEikonal.so eikonal2D.cu -lnppig

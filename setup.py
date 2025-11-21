@@ -13,7 +13,7 @@ else:
 
 
 setup(
-    name="golem",
+    name="openseismicprocessing",
     version="0.1.0",
     description="Seismic Processing Toolkit",
     long_description=long_description,
@@ -22,7 +22,7 @@ setup(
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     include_package_data=True,
-    package_data={"golem": ["lib/*.so"]},
+    package_data={"openseismicprocessing": ["lib/*.so"]},
     python_requires=">=3.8,<3.12",
     install_requires=[
         "numpy",
