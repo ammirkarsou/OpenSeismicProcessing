@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Sequence, Optional, Tuple, Dict, Union, Any
+from typing import Iterable, Sequence, Optional, Tuple, Dict, Union, Any, Callable
 
 import numpy as np
 import segyio
@@ -13,6 +13,17 @@ from numcodecs import Blosc
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pandas as pd
+import json
+from datetime import datetime
+from uuid import uuid4
+from openseismicprocessing.constants import TRACE_HEADER_REV0, TRACE_HEADER_REV1
+
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+except Exception:
+    pa = None
+    pq = None
 
 
 def _resolve_segy_inputs(paths: Union[str, Path, Sequence[Union[str, Path]]]) -> list[Path]:
@@ -148,64 +159,87 @@ def segy_directory_to_zarr(
     headers: Sequence[str] | None = None,
     chunk_trace: int = 512,
     compressor: Blosc | None = None,
+    geometry_out: str | Path | None = None,
+    allow_overwrite: bool = False,
+    dataset_type: str | None = None,
+    unit_factor: float = 1.0,
+    coord_scales: Union[Dict[str, float], Callable[[Path, Any], Dict[str, float]], None] = None,
+    allow_append: bool = True,
+    header_spec: Dict[str, Tuple[int, int]] | None = None,
 ) -> str:
-    """Convert all SEG-Y files in ``segy_dir`` into a single Zarr store."""
+    """Convert SEG-Y files into a Zarr store + geometry table using header_spec names."""
 
+    header_spec = header_spec or TRACE_HEADER_REV0
     if headers is None:
-        headers = ("SourceX", "GroupX", "offset")
+        headers = tuple(header_spec.keys())
 
     files = _resolve_segy_inputs(segy_input)
 
     lower_to_original = {header.lower(): header for header in headers}
 
-    total_traces = 0
-    ns = None
-    for file_path in tqdm(files, desc="Counting traces"):
-        with segyio.open(file_path, "r", ignore_geometry=True) as f:
-            total_traces += len(f.trace)
-            if ns is None:
-                ns = len(f.samples)
-
-    if ns is None:
-        raise RuntimeError("Could not determine number of samples per trace.")
+    # Determine number of samples from the first file
+    try:
+        with segyio.open(files[0], "r", ignore_geometry=True) as f0:
+            ns = len(f0.samples)
+    except Exception as exc:
+        raise RuntimeError(f"Could not determine number of samples per trace: {exc}") from exc
 
     compressor = compressor or Blosc(cname="zstd", clevel=5, shuffle=Blosc.SHUFFLE)
     zarr_out = Path(zarr_out)
+    if zarr_out.exists() and not allow_overwrite and not allow_append:
+        raise FileExistsError(f"Zarr store {zarr_out} already exists. Set allow_overwrite=True to replace.")
     zarr_out.parent.mkdir(parents=True, exist_ok=True)
-    root = zarr.open(zarr_out, mode="w")
+    append_mode = zarr_out.exists() and allow_append and not allow_overwrite
+    root = zarr.open(zarr_out, mode="r+" if append_mode else ("w-" if not allow_overwrite else "w"))
     file_metadata: list[Dict[str, Any]] = []
+    dataset_id = str(uuid4())
+    suffix = f".{dataset_type}.geometry.parquet" if dataset_type else ".geometry.parquet"
+    geometry_path = Path(str(zarr_out) + suffix) if geometry_out is None else Path(geometry_out)
+    if pa is None or pq is None:
+        geometry_path = geometry_path.with_suffix(".csv")
     root.attrs.update(
         {
             "description": "SEG-Y to Zarr flat trace layout",
             "headers": list(headers),
             "samples": int(ns),
             "source_inputs": [str(f) for f in files],
+            "dataset_id": dataset_id,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "dataset_type": dataset_type or "",
         }
     )
 
-    amp = root.create_dataset(
-        "amplitude",
-        shape=(ns, total_traces),
-        chunks=(ns, chunk_trace),
-        dtype="float32",
-        compressor=compressor,
-    )
-    amp.attrs["_ARRAY_DIMENSIONS"] = ["sample", "trace"]
-    amp.attrs["layout"] = "sample_trace"
-
-    header_arrays = {}
-    for header in headers:
-        header_arrays[header] = root.create_dataset(
-            header,
-            shape=(total_traces,),
-            chunks=(chunk_trace,),
-            dtype="float64",
+    if "amplitude" not in root:
+        amp = root.create_dataset(
+            "amplitude",
+            shape=(ns, 0),
+            chunks=(ns, chunk_trace),
+            dtype="float32",
             compressor=compressor,
+            maxshape=(ns, None),
         )
-        header_arrays[header].attrs["_ARRAY_DIMENSIONS"] = ["trace"]
+        amp.attrs["_ARRAY_DIMENSIONS"] = ["sample", "trace"]
+        amp.attrs["layout"] = "sample_trace"
+        root.attrs["total_traces"] = 0
+    else:
+        amp = root["amplitude"]
 
-    offset = 0
-    for file_path in tqdm(files, desc="Streaming SEGY files"):
+    # Geometry/index writer (Parquet)
+    arrow_writer = None
+    pending_frames: list[pd.DataFrame] = []
+    existing_geom_df = None
+    if append_mode and geometry_path.exists():
+        try:
+            if geometry_path.suffix.lower() == ".csv":
+                existing_geom_df = pd.read_csv(geometry_path, usecols=["trace_id", "file_id", "trace_in_file"], engine="c")
+            else:
+                existing_geom_df = pd.read_parquet(geometry_path, columns=None)
+        except Exception:
+            existing_geom_df = None
+
+    offset = int(root.attrs.get("total_traces", 0)) if append_mode else 0
+    append_file_offset = len(files) if append_mode else 0
+    for file_id, file_path in enumerate(tqdm(files, desc="Streaming SEGY files")):
         try:
             f = segyio.open(file_path, "r", ignore_geometry=False)
             _ = f.ilines  # trigger inline parsing; fails for 2D
@@ -231,37 +265,209 @@ def segy_directory_to_zarr(
             data = np.asarray(f.trace.raw[:], dtype=np.float32)
 
             geom: dict[str, Iterable[float]] = {}
-            if "offset" in lower_to_original:
+            for name in headers:
+                if name not in header_spec:
+                    continue
+                offset_bytes, _ = header_spec[name]
                 try:
-                    sx = np.fromiter((f.header[i][segyio.TraceField.SourceX] for i in range(ntr)), dtype=np.float64)
-                    gx = np.fromiter((f.header[i][segyio.TraceField.GroupX] for i in range(ntr)), dtype=np.float64)
-                    geom[lower_to_original["offset"]] = np.abs(sx - gx)
+                    vals = f.attributes(offset_bytes)[:ntr]
                 except Exception:
-                    pass
-
-            for lower, original in lower_to_original.items():
-                if lower == "offset":
                     continue
-                try:
-                    field = getattr(segyio.TraceField, original)
-                except AttributeError:
-                    print(f"⚠️ Unknown header '{original}' — skipped")
-                    continue
-                geom[original] = np.fromiter(
-                    (f.header[i][field] for i in range(ntr)), dtype=np.float64
-                )
+                geom[name] = np.asarray(vals, dtype=np.float32)
 
         idx_end = offset + ntr
+        amp.resize(ns, idx_end)
         amp[:, offset:idx_end] = data.T
-        for header_name, values in geom.items():
-            header_arrays[header_name][offset:idx_end] = values
+
+        # Decide per-file scales
+        if callable(coord_scales):
+            scale_map = coord_scales(file_path, f)
+        else:
+            scale_map = coord_scales or {}
+        scale_map_lower = {str(k).lower(): v for k, v in (scale_map or {}).items()}
+
+        # Geometry/index chunk
+        trace_id = np.arange(offset, idx_end, dtype=np.int64)
+        trace_in_file = np.arange(ntr, dtype=np.int32)
+        file_ids = np.full(ntr, file_id + append_file_offset, dtype=np.int32)
+        data_dict = {
+            "trace_id": trace_id,
+            "file_id": file_ids,
+            "trace_in_file": trace_in_file,
+        }
+        def _scale_array(val, length: int) -> np.ndarray:
+            arr = np.ones(length, dtype=np.float32)
+            if val is None:
+                return arr
+            v = np.asarray(val)
+            if v.shape == () or v.size == 1:
+                scalar = float(v)
+                if scalar == 0:
+                    return arr
+                arr = np.full(length, scalar if scalar > 0 else 1.0 / abs(scalar), dtype=np.float32)
+                return arr
+            v = v.astype(np.float32, copy=False).flatten()
+            if v.size != length:
+                v = np.resize(v, length)
+            pos = v > 0
+            neg = v < 0
+            arr[pos] = v[pos]
+            arr[neg] = 1.0 / np.abs(v[neg])
+            return arr
+
+        for hname, vals in geom.items():
+            arr = np.asarray(vals, dtype=np.float32)
+            scale_factors = np.ones_like(arr, dtype=np.float32)
+            key = str(hname).lower()
+            if scale_map_lower and key in scale_map_lower:
+                scale_factors = _scale_array(scale_map_lower[key], len(arr))
+            arr = arr * scale_factors
+            if unit_factor != 1.0:
+                arr = arr * unit_factor
+            data_dict[hname] = arr
+        if pa is not None and pq is not None:
+            table = pa.Table.from_pydict(data_dict)
+            if arrow_writer is None:
+                arrow_writer = pq.ParquetWriter(geometry_path, table.schema)
+            arrow_writer.write_table(table)
+        else:
+            pending_frames.append(pd.DataFrame(data_dict))
+
         offset = idx_end
         file_metadata.append(entry)
 
+    if arrow_writer is not None:
+        arrow_writer.close()
+    elif pending_frames:
+        df_new = pd.concat(pending_frames, ignore_index=True)
+        if existing_geom_df is not None:
+            df_all = pd.concat([existing_geom_df, df_new], ignore_index=True)
+        else:
+            df_all = df_new
+        try:
+            df_all.to_parquet(geometry_path)
+        except Exception:
+            csv_path = geometry_path.with_suffix(".csv")
+            df_all.to_csv(csv_path, index=False)
+            geometry_path = csv_path
+
     root.attrs["file_metadata"] = file_metadata
+    root.attrs["total_traces"] = int(offset)
     zarr_path = str(Path(zarr_out).resolve())
+    manifest = {
+        "dataset_id": dataset_id,
+        "zarr_store": zarr_path,
+        "geometry_parquet": str(geometry_path.resolve()),
+        "headers": list(headers),
+        "samples": int(ns),
+        "chunk_trace": int(chunk_trace),
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "source_inputs": [str(f) for f in files],
+        "dataset_type": dataset_type or "",
+    }
+    manifest_path = Path(str(zarr_out) + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2))
     context["zarr_store"] = zarr_path
     return zarr_path
+
+
+def subset_zarr_by_trace_ids(
+    context: dict,
+    source_zarr: str | Path,
+    source_geometry: str | Path,
+    trace_ids: Sequence[int],
+    out_zarr: str | Path,
+    out_geometry: str | Path | None = None,
+    *,
+    chunk_trace: int = 512,
+    compressor: Blosc | None = None,
+    dataset_type: str | None = None,
+    allow_overwrite: bool = False,
+) -> str:
+    """Create a new Zarr + geometry Parquet subset from selected trace_ids."""
+
+    import numpy.lib.stride_tricks as stride_tricks
+
+    if not trace_ids:
+        raise ValueError("trace_ids must be non-empty")
+    trace_ids = np.asarray(trace_ids, dtype=np.int64)
+
+    src_store = zarr.open(source_zarr, mode="r")
+    if "amplitude" not in src_store:
+        raise KeyError("Source Zarr missing 'amplitude'")
+    amp_src = src_store["amplitude"]
+    ns, ntr = amp_src.shape
+
+    if np.any(trace_ids < 0) or np.any(trace_ids >= ntr):
+        raise IndexError("trace_ids contain out-of-bounds indices for source Zarr")
+
+    geom_df = pd.read_parquet(source_geometry)
+    geom_subset = geom_df[geom_df["trace_id"].isin(trace_ids)].copy()
+    # Preserve order of trace_ids in output
+    order_map = pd.Index(trace_ids)
+    geom_subset["order_idx"] = order_map.get_indexer(geom_subset["trace_id"])
+    geom_subset = geom_subset.sort_values("order_idx").drop(columns=["order_idx"])
+
+    out_zarr = Path(out_zarr)
+    if out_zarr.exists() and not allow_overwrite:
+        raise FileExistsError(f"Output Zarr {out_zarr} exists. Set allow_overwrite=True to replace.")
+    out_zarr.parent.mkdir(parents=True, exist_ok=True)
+    compressor = compressor or Blosc(cname="zstd", clevel=5, shuffle=Blosc.SHUFFLE)
+
+    root = zarr.open(out_zarr, mode="w-" if not allow_overwrite else "w")
+    root.attrs.update(
+        {
+            "description": "Subset of SEG-Y Zarr",
+            "parent_store": str(source_zarr),
+            "dataset_type": dataset_type or "",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+    )
+    amp_out = root.create_dataset(
+        "amplitude",
+        shape=(ns, len(trace_ids)),
+        chunks=(ns, chunk_trace),
+        dtype="float32",
+        compressor=compressor,
+    )
+    amp_out.attrs["_ARRAY_DIMENSIONS"] = ["sample", "trace"]
+
+    # Copy amplitudes in chunks
+    block = 2048
+    for start in range(0, len(trace_ids), block):
+        end = min(start + block, len(trace_ids))
+        idx_block = trace_ids[start:end]
+        amp_out[:, start:end] = amp_src[:, idx_block]
+
+    # Write geometry parquet/CSV (fallback if parquet engine missing)
+    out_geom = Path(out_geometry) if out_geometry else Path(str(out_zarr) + ".geometry.parquet")
+    if pa is None or pq is None:
+        out_geom = out_geom.with_suffix(".csv")
+    out_geom.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        geom_subset.to_parquet(out_geom)
+    except Exception:
+        csv_path = out_geom.with_suffix(".csv")
+        geom_subset.to_csv(csv_path, index=False)
+        out_geom = csv_path
+
+    manifest = {
+        "dataset_id": str(uuid4()),
+        "parent_store": str(source_zarr),
+        "zarr_store": str(out_zarr.resolve()),
+        "geometry_parquet": str(out_geom.resolve()),
+        "dataset_type": dataset_type or "",
+        "trace_count": int(len(trace_ids)),
+        "samples": int(ns),
+        "chunk_trace": int(chunk_trace),
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+    manifest_path = Path(str(out_zarr) + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    context["zarr_store"] = str(out_zarr.resolve())
+    context["geometry_parquet"] = str(out_geom.resolve())
+    return str(out_zarr.resolve())
 
 
 def load_zarr_amplitude(
