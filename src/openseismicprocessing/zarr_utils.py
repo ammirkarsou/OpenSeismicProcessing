@@ -175,6 +175,7 @@ def segy_directory_to_zarr(
 
     files = _resolve_segy_inputs(segy_input)
 
+    # Canonical header-name mapping for scaling
     lower_to_original = {header.lower(): header for header in headers}
 
     # Determine number of samples from the first file
@@ -238,8 +239,44 @@ def segy_directory_to_zarr(
             existing_geom_df = None
 
     offset = int(root.attrs.get("total_traces", 0)) if append_mode else 0
-    append_file_offset = len(files) if append_mode else 0
+    if append_mode and existing_geom_df is not None and "file_id" in existing_geom_df.columns:
+        append_file_offset = int(existing_geom_df["file_id"].max()) + 1
+    else:
+        append_file_offset = 0
+
+    def _scale_array(val, length: int) -> np.ndarray:
+        """Convert SEG-Y scalar semantics to multiplicative array.
+
+        Positive scalar => multiply by scalar.
+        Negative scalar => divide by abs(scalar).
+        0 or None => no scaling (all 1s).
+        """
+        arr = np.ones(length, dtype=np.float32)
+        if val is None:
+            return arr
+
+        v = np.asarray(val)
+
+        # scalar
+        if v.shape == () or v.size == 1:
+            scalar = float(v)
+            if scalar == 0:
+                return arr
+            arr = np.full(length, scalar if scalar > 0 else 1.0 / abs(scalar), dtype=np.float32)
+            return arr
+
+        # array of scalars
+        v = v.astype(np.float32, copy=False).flatten()
+        if v.size != length:
+            v = np.resize(v, length)
+        pos = v > 0
+        neg = v < 0
+        arr[pos] = v[pos]
+        arr[neg] = 1.0 / np.abs(v[neg])
+        return arr
+
     for file_id, file_path in enumerate(tqdm(files, desc="Streaming SEGY files")):
+        file_path = Path(file_path)
         try:
             f = segyio.open(file_path, "r", ignore_geometry=False)
             _ = f.ilines  # trigger inline parsing; fails for 2D
@@ -275,16 +312,29 @@ def segy_directory_to_zarr(
                     continue
                 geom[name] = np.asarray(vals, dtype=np.float32)
 
+            # Decide per-file scales *while file is open*
+            if callable(coord_scales):
+                try:
+                    scale_map = coord_scales(file_path, f)
+                except Exception:
+                    scale_map = {}
+            else:
+                scale_map = coord_scales or {}
+
+            # Normalize scale map keys to canonical header names
+            scale_map_lower: Dict[str, Any] = {}
+            for raw_key, val in (scale_map or {}).items():
+                lk = str(raw_key).lower()
+                canonical = lower_to_original.get(lk)
+                if canonical is not None:
+                    scale_map_lower[canonical.lower()] = val
+                else:
+                    # fallback – allow arbitrary keys that already match geom names
+                    scale_map_lower[lk] = val
+
         idx_end = offset + ntr
         amp.resize(ns, idx_end)
         amp[:, offset:idx_end] = data.T
-
-        # Decide per-file scales
-        if callable(coord_scales):
-            scale_map = coord_scales(file_path, f)
-        else:
-            scale_map = coord_scales or {}
-        scale_map_lower = {str(k).lower(): v for k, v in (scale_map or {}).items()}
 
         # Geometry/index chunk
         trace_id = np.arange(offset, idx_end, dtype=np.int64)
@@ -295,25 +345,6 @@ def segy_directory_to_zarr(
             "file_id": file_ids,
             "trace_in_file": trace_in_file,
         }
-        def _scale_array(val, length: int) -> np.ndarray:
-            arr = np.ones(length, dtype=np.float32)
-            if val is None:
-                return arr
-            v = np.asarray(val)
-            if v.shape == () or v.size == 1:
-                scalar = float(v)
-                if scalar == 0:
-                    return arr
-                arr = np.full(length, scalar if scalar > 0 else 1.0 / abs(scalar), dtype=np.float32)
-                return arr
-            v = v.astype(np.float32, copy=False).flatten()
-            if v.size != length:
-                v = np.resize(v, length)
-            pos = v > 0
-            neg = v < 0
-            arr[pos] = v[pos]
-            arr[neg] = 1.0 / np.abs(v[neg])
-            return arr
 
         for hname, vals in geom.items():
             arr = np.asarray(vals, dtype=np.float32)
@@ -325,6 +356,7 @@ def segy_directory_to_zarr(
             if unit_factor != 1.0:
                 arr = arr * unit_factor
             data_dict[hname] = arr
+
         if pa is not None and pq is not None:
             table = pa.Table.from_pydict(data_dict)
             if arrow_writer is None:
