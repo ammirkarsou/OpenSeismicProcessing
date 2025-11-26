@@ -26,6 +26,23 @@ except Exception:
     pq = None
 
 
+def _json_safe(obj):
+    """Convert objects to JSON-serializable forms."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 def _resolve_segy_inputs(paths: Union[str, Path, Sequence[Union[str, Path]]]) -> list[Path]:
     if isinstance(paths, (str, Path)):
         candidates = [Path(paths)]
@@ -388,6 +405,7 @@ def segy_directory_to_zarr(
     zarr_path = str(Path(zarr_out).resolve())
     manifest = {
         "dataset_id": dataset_id,
+        "dataset_name": Path(zarr_out).stem,
         "zarr_store": zarr_path,
         "geometry_parquet": str(geometry_path.resolve()),
         "headers": list(headers),
@@ -398,7 +416,7 @@ def segy_directory_to_zarr(
         "dataset_type": dataset_type or "",
     }
     manifest_path = Path(str(zarr_out) + ".manifest.json")
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+    manifest_path.write_text(json.dumps(_json_safe(manifest), indent=2))
     context["zarr_store"] = zarr_path
     return zarr_path
 

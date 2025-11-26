@@ -129,6 +129,12 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         path_layout.addWidget(self.buttonLoad)
         main_layout.addLayout(path_layout)
 
+        name_layout = QtWidgets.QHBoxLayout()
+        name_layout.addWidget(QtWidgets.QLabel("Dataset name"))
+        self.datasetNameEdit = QtWidgets.QLineEdit()
+        name_layout.addWidget(self.datasetNameEdit, stretch=1)
+        main_layout.addLayout(name_layout)
+
         slider_layout = QtWidgets.QHBoxLayout()
         self.fileSliderLabel = QtWidgets.QLabel("File 1/1")
         self.fileSlider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
@@ -830,7 +836,8 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         binaries_dir.mkdir(parents=True, exist_ok=True)
         geometry_dir.mkdir(parents=True, exist_ok=True)
         dataset_type = self._dataset_type_slug()
-        base_name = dataset_type if dataset_type else "segy_import"
+        user_name = (self.datasetNameEdit.text() or "").strip()
+        base_name = user_name if user_name else (dataset_type if dataset_type else "segy_import")
         zarr_name = f"{base_name}.zarr"
         geom_name = f"{base_name}.geometry.parquet"
         return binaries_dir / zarr_name, geometry_dir / geom_name
@@ -1174,10 +1181,17 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         self.comboBox4.addItems(columns)
         defaults = [0, 1, 2, 3]
         combos = [self.comboBox, self.comboBox2, self.comboBox3, self.comboBox4]
+        pre_defaults = ["sx", "sy", "gx", "gy"]
         for idx, combo in enumerate(combos):
             if preserve_selection and prev_selection[idx] in columns:
                 combo.setCurrentText(prev_selection[idx])
-            elif combo.count() > defaults[idx]:
+                continue
+            if "3D Pre-stack" in mode or "2D Pre-stack" in mode:
+                target = pre_defaults[idx]
+                if target in columns:
+                    combo.setCurrentText(target)
+                    continue
+            if combo.count() > defaults[idx]:
                 combo.setCurrentIndex(defaults[idx])
             elif combo.count() > 0:
                 combo.setCurrentIndex(0)
