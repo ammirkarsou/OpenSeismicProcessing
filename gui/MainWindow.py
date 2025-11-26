@@ -172,6 +172,15 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
                     self.list.addItem(item)
                 self.list.itemChanged.connect(self.update_plot)
 
+                self.showSourcesChk = QtWidgets.QCheckBox("Sources")
+                self.showSourcesChk.setChecked(True)
+                self.showReceiversChk = QtWidgets.QCheckBox("Receivers")
+                self.showReceiversChk.setChecked(True)
+                self.showFoldChk = QtWidgets.QCheckBox("Fold map")
+                self.showFoldChk.setChecked(False)
+                for chk in (self.showSourcesChk, self.showReceiversChk, self.showFoldChk):
+                    chk.stateChanged.connect(self.update_plot)
+
                 self.figure = Figure(figsize=(8, 6))
                 self.canvas = FigureCanvas(self.figure)
                 self.toolbar = NavigationToolbar2QT(self.canvas, self)
@@ -179,6 +188,10 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
                 left_layout = QtWidgets.QVBoxLayout()
                 left_layout.addWidget(QtWidgets.QLabel("Datasets"))
                 left_layout.addWidget(self.list)
+                left_layout.addWidget(self.showSourcesChk)
+                left_layout.addWidget(self.showReceiversChk)
+                left_layout.addWidget(self.showFoldChk)
+                left_layout.addStretch()
 
                 right_layout = QtWidgets.QVBoxLayout()
                 right_layout.addWidget(self.toolbar)
@@ -253,9 +266,24 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
                             idx = np.linspace(0, len(sx) - 1, max_points, dtype=int)
                             sx, sy, gx, gy = sx[idx], sy[idx], gx[idx], gy[idx]
                         base_label = path.name.replace(".geometry.parquet", "").replace(".geometry.csv", "")
-                        ax.scatter(gx, gy, s=2, c="blue", alpha=0.5, rasterized=True, label=f"{base_label} Receivers")
-                        ax.scatter(sx, sy, s=2, c="red", alpha=0.5, rasterized=True, label=f"{base_label} Sources")
-                        plotted = True
+                        if self.showFoldChk.isChecked():
+                            try:
+                                bins = 200
+                                H, xedges, yedges = np.histogram2d(gx, gy, bins=bins)
+                                X, Y = np.meshgrid(xedges, yedges)
+                                pcm = ax.pcolormesh(X, Y, H.T, cmap="plasma", shading="auto", rasterized=True)
+                                cbar = self.figure.colorbar(pcm, ax=ax, fraction=0.046, pad=0.04)
+                                cbar.set_label("Fold")
+                                pcm.set_label(f"{base_label} fold")
+                                plotted = True
+                            except Exception:
+                                pass
+                        if self.showReceiversChk.isChecked():
+                            ax.scatter(gx, gy, s=2, c="blue", alpha=0.5, rasterized=True, label=f"{base_label} Receivers")
+                            plotted = True
+                        if self.showSourcesChk.isChecked():
+                            ax.scatter(sx, sy, s=2, c="red", alpha=0.5, rasterized=True, label=f"{base_label} Sources")
+                            plotted = True
                     elif is_post and sx_col and sy_col:
                         x_vals = df[sx_col].to_numpy(dtype=float, copy=False)
                         y_vals = df[sy_col].to_numpy(dtype=float, copy=False)
@@ -284,7 +312,7 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
                     paired = list(zip(labels, handles))
                     paired.sort(key=lambda x: (0 if "Survey footprint" in x[0] else 1, x[0]))
                     labels_sorted, handles_sorted = zip(*paired)
-                    ax.legend(handles_sorted, labels_sorted, markerscale=2)
+                    ax.legend(handles_sorted, labels_sorted, markerscale=2, loc="upper right")
                 self.canvas.draw_idle()
 
         dlg = BasemapDialog(self, geometry_files, boundary)
