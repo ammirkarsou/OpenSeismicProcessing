@@ -659,6 +659,33 @@ class ImportSEGYDialog(QtWidgets.QDialog):
 
         return float(x_min), float(x_max), float(y_min), float(y_max)
 
+    def _scale_array_from_df(self, df: pd.DataFrame, scale_name: str, manual_checkbox, manual_spin) -> np.ndarray:
+        """Return per-trace scaling factors from a dataframe column or manual value."""
+        n = len(df)
+        factors = np.ones(n, dtype=float)
+
+        def to_factor(val: float) -> float:
+            if val in (None, 0):
+                return 1.0
+            return val if val > 0 else 1.0 / abs(val)
+
+        if manual_checkbox.isChecked():
+            val = manual_spin.value() or 1.0
+            factors.fill(to_factor(val))
+            return factors
+
+        if not scale_name or scale_name not in df.columns:
+            return factors
+
+        arr = df[scale_name].to_numpy(dtype=float, copy=False)
+        if len(arr) != n:
+            return factors
+        pos = arr > 0
+        neg = arr < 0
+        factors[pos] = arr[pos]
+        factors[neg] = 1.0 / np.abs(arr[neg])
+        return factors
+
     def _coord_scale_map(self, segy_file) -> dict[str, float]:
         """Determine scale per selected coordinate header for the given SEG-Y file."""
         cols_and_scales = [
@@ -1368,6 +1395,54 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             super().accept()
             return
 
+        # Post-stack: boundary check using sx/sy only
+        bounds = self._extract_boundary()
+        if bounds is None:
+            QtWidgets.QMessageBox.information(self, "Boundary Missing", "No survey bounding box is available to check traces.")
+            return
+        x_min, x_max, y_min, y_max = bounds
+        # load headers to check
+        headers = self._load_trace_headers(max_traces=None, per_file=False)
+        if headers is None or headers.empty:
+            QtWidgets.QMessageBox.warning(self, "Trace Check", "Failed to read headers for boundary check.")
+            return
+        sx_col = self.selected_xrange_column
+        sy_col = self.selected_yrange_column
+        try:
+            sx_vals = headers[sx_col].to_numpy(dtype=float, copy=False)
+            sy_vals = headers[sy_col].to_numpy(dtype=float, copy=False)
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Trace Check", "Missing X/Y columns for boundary check.")
+            return
+        sx_scale = self._scale_array_from_df(headers, self.xScaleCombo.currentText(), self.xManualCheck, self.xManualSpin)
+        sy_scale = self._scale_array_from_df(headers, self.yScaleCombo.currentText(), self.yManualCheck, self.yManualSpin)
+        unit_factor = self._unit_factor()
+        sx_scaled = sx_vals * sx_scale
+        sy_scaled = sy_vals * sy_scale
+        mask_out = (sx_scaled < x_min) | (sx_scaled > x_max) | (sy_scaled < y_min) | (sy_scaled > y_max)
+        outside = int(mask_out.sum())
+        total = len(sx_vals)
+        if outside == 0:
+            QtWidgets.QMessageBox.information(self, "Trace Check", "All traces are inside the survey bounding box.")
+            if not self._load_and_save_traces():
+                return
+        else:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Trace Check",
+                f"{outside} of {total} traces are outside the survey bounding box.\n"
+                f"Load the {total - outside} inside traces?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+            inside_ids = np.nonzero(~mask_out)[0].astype(np.int64)
+            if inside_ids.size == 0:
+                QtWidgets.QMessageBox.information(self, "Trace Check", "No traces inside the bounding box to load.")
+                return
+            if not self._load_and_save_traces(trace_ids=inside_ids):
+                return
         super().accept()
         
     # def PassChildClassValues(self, parentClass):
@@ -1785,9 +1860,13 @@ class DialogBox(QtWidgets.QDialog):
                     # ✅ Open the child dialog and pass the SEGYImport dialog
                     if mode == "2D Post-stack":
                         child_dialog = TwoDimensionPostStackSEGYDialog(SEGYImport)
+                    elif mode == "3D Post-stack":
+                        child_dialog = None  # no child dialog needed for 3D post-stack
+                    else:
+                        child_dialog = None  # pre-stack flows already handled in import
 
                     # Open the dialog and wait for the user's response
-                    if child_dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:  # If user clicks OK in the child dialog
+                    if child_dialog is not None and child_dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
                         
                         # ✅ Create the survey folder
                         self.CreateSurveyFolder(survey_name)
