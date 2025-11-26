@@ -28,6 +28,7 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
         self.actionSetupSurvey = self.findChild(QAction, "action_Select_Setup")  # Add your QAction here
         self.actionLoadSegy = self.findChild(QAction, "action_Seg_y_file")
         self.actionBaseMap = self.findChild(QAction, "action_Base_Map")
+        self.actionHeaders = self.findChild(QAction, "action_Headers")
 
         # Connect QAction to their respective functions
         self.actionSetRootFolder.triggered.connect(self.SelectRootFolder)
@@ -36,6 +37,8 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
             self.actionLoadSegy.triggered.connect(self.LoadSegyFiles)
         if self.actionBaseMap:
             self.actionBaseMap.triggered.connect(self.ShowBasemap)
+        if self.actionHeaders:
+            self.actionHeaders.triggered.connect(self.ShowHeaders)
 
         # ✅ Set up an initial empty visualization
         # self.init_empty_visualization()    
@@ -130,6 +133,85 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Basemap Error", f"Failed to read geometry file:\n{exc}")
             return None
 
+    def ShowHeaders(self):
+        if not self.currentSurveyPath:
+            QtWidgets.QMessageBox.warning(self, "Warning", "Please select a survey first.")
+            return
+        geom_dir = Path(self.currentSurveyPath) / "Geometry"
+        if not geom_dir.exists():
+            QtWidgets.QMessageBox.warning(self, "Warning", "No geometry folder found for the survey.")
+            return
+        geometry_files = sorted(
+            list(geom_dir.glob("*.parquet")) + list(geom_dir.glob("*.csv")),
+            key=lambda p: p.name.lower(),
+        )
+        if not geometry_files:
+            QtWidgets.QMessageBox.warning(self, "Warning", "No geometry file found in the survey (Geometry folder).")
+            return
+
+        class HeadersDialog(QtWidgets.QDialog):
+            def __init__(self, parent, files):
+                super().__init__(parent)
+                self.files = files
+                self.selected_file = None
+                def base_label(p: Path) -> str:
+                    return p.name.replace(".geometry.parquet", "").replace(".geometry.csv", "")
+
+                self.setWindowTitle("Select Geometry Dataset")
+                self.resize(400, 200)
+
+                layout = QtWidgets.QVBoxLayout(self)
+                layout.addWidget(QtWidgets.QLabel("Select dataset:"))
+                self.combo = QtWidgets.QComboBox()
+                for path in self.files:
+                    self.combo.addItem(base_label(path), userData=path)
+                layout.addWidget(self.combo)
+                layout.addWidget(QtWidgets.QLabel("Rows to show:"))
+                self.rowSpin = QtWidgets.QSpinBox()
+                self.rowSpin.setRange(1, 1_000_000)
+                self.rowSpin.setValue(1000)
+                self.rowSpin.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+                layout.addWidget(self.rowSpin)
+                button_box = QtWidgets.QDialogButtonBox(
+                    QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+                )
+                button_box.accepted.connect(self.accept)
+                button_box.rejected.connect(self.reject)
+                layout.addWidget(button_box)
+
+            def get_selection(self):
+                if self.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                    return self.combo.currentData(), int(self.rowSpin.value())
+                return None, None
+
+        dlg = HeadersDialog(self, geometry_files)
+        geom_path, n_rows = dlg.get_selection()
+        if not geom_path:
+            return
+        try:
+            df = pd.read_csv(geom_path) if geom_path.suffix.lower() == ".csv" else pd.read_parquet(geom_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Headers Error", f"Failed to read geometry {geom_path.name}:\n{exc}")
+            return
+
+        view_df = df.head(n_rows)
+        table = QtWidgets.QTableWidget()
+        table.setRowCount(len(view_df))
+        table.setColumnCount(len(view_df.columns))
+        table.setHorizontalHeaderLabels([str(c) for c in view_df.columns])
+        for i in range(len(view_df)):
+            for j, col in enumerate(view_df.columns):
+                table.setItem(i, j, QtWidgets.QTableWidgetItem(str(view_df.iat[i, j])))
+        table.resizeColumnsToContents()
+
+        viewer = QtWidgets.QDialog(self)
+        viewer.setWindowTitle(f"Headers: {geom_path.name.replace('.geometry.parquet','').replace('.geometry.csv','')}")
+        v_layout = QtWidgets.QVBoxLayout(viewer)
+        v_layout.addWidget(table)
+        viewer.resize(900, 700)
+        viewer.exec()
+
+
     def ShowBasemap(self):
         if not self.currentSurveyPath:
             QtWidgets.QMessageBox.warning(self, "Warning", "Please select a survey first.")
@@ -164,8 +246,10 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
                 self.resize(1100, 700)
                 self.list = QtWidgets.QListWidget()
                 self.list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+                def base_label(p: Path) -> str:
+                    return p.name.replace(".geometry.parquet", "").replace(".geometry.csv", "")
                 for path in self.files:
-                    item = QtWidgets.QListWidgetItem(path.name)
+                    item = QtWidgets.QListWidgetItem(base_label(path))
                     item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
                     item.setCheckState(QtCore.Qt.CheckState.Checked)
                     item.setData(QtCore.Qt.ItemDataRole.UserRole, path)

@@ -14,7 +14,6 @@
    <font>
     <family>DejaVu Serif</family>
     <pointsize>18</pointsize>
-    <weight>75</weight>
     <bold>true</bold>
    </font>
   </property>
@@ -40,7 +39,6 @@
      <font>
       <family>DejaVu Serif</family>
       <pointsize>14</pointsize>
-      <weight>75</weight>
       <bold>true</bold>
      </font>
     </property>
@@ -52,7 +50,6 @@
       <font>
        <family>DejaVu Serif</family>
        <pointsize>14</pointsize>
-       <weight>75</weight>
        <bold>true</bold>
       </font>
      </property>
@@ -66,7 +63,6 @@
       <font>
        <family>DejaVu Serif</family>
        <pointsize>14</pointsize>
-       <weight>75</weight>
        <bold>true</bold>
       </font>
      </property>
@@ -92,6 +88,9 @@
      <string>&amp;View</string>
     </property>
     <addaction name="action_Base_Map"/>
+    <addaction name="action_Headers"/>
+    <addaction name="action_2D_Viewer"/>
+    <addaction name="action_3D_Viewer"/>
    </widget>
    <widget class="QMenu" name="menu_File">
     <property name="title">
@@ -110,9 +109,9 @@
     </property>
    </widget>
    <addaction name="menu_File"/>
+   <addaction name="View"/>
    <addaction name="menu_Survey"/>
    <addaction name="menu_Processing"/>
-   <addaction name="View"/>
    <addaction name="menu_Help"/>
    <addaction name="menu_About"/>
   </widget>
@@ -129,7 +128,7 @@
   </action>
   <action name="action_Seg_y_file">
    <property name="text">
-    <string>&amp;Seg-y file...</string>
+    <string>&amp;Seg-Y File...</string>
    </property>
    <property name="font">
     <font>
@@ -139,7 +138,7 @@
   </action>
   <action name="action_Seg_y_file_2">
    <property name="text">
-    <string>&amp;Seg-y file...</string>
+    <string>&amp;Seg-Y File...</string>
    </property>
    <property name="font">
     <font>
@@ -167,7 +166,7 @@
   </action>
   <action name="action_Base_Map">
    <property name="text">
-    <string>&amp;Base Map</string>
+    <string>&amp;Base Map...</string>
    </property>
   </action>
   <action name="action_Set_Root_Folder">
@@ -193,6 +192,21 @@
   <action name="action_Select_Setup">
    <property name="text">
     <string>&amp;Select/Setup ...</string>
+   </property>
+  </action>
+  <action name="action_Headers">
+   <property name="text">
+    <string>&amp;Headers...</string>
+   </property>
+  </action>
+  <action name="action_2D_Viewer">
+   <property name="text">
+    <string>&amp;2D Viewer...</string>
+   </property>
+  </action>
+  <action name="action_3D_Viewer">
+   <property name="text">
+    <string>&amp;3D Viewer...</string>
    </property>
   </action>
  </widget>
