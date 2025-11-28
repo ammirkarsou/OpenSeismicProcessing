@@ -150,7 +150,18 @@ class Viewer2D(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "2D Viewer", f"Failed to read geometry:\n{exc}")
             return
         try:
-            self.amp = zarr.open(zarr_path, mode="r")["amplitude"] if zarr_path else None
+            store = zarr.open(zarr_path, mode="r") if zarr_path else None
+            self.amp = store["amplitude"] if store is not None else None
+            if store is not None and "trace_ids" in store:
+                ids = np.asarray(store["trace_ids"][:], dtype=np.int64)
+                if self.geom_df is not None:
+                    if "trace_id" in self.geom_df.columns:
+                        try:
+                            self.geom_df = self.geom_df.set_index("trace_id").loc[ids].reset_index()
+                        except Exception:
+                            self.geom_df = self.geom_df.iloc[ids]
+                    else:
+                        self.geom_df = self.geom_df.iloc[ids]
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "2D Viewer", f"Failed to open Zarr store:\n{exc}")
             return

@@ -2,15 +2,92 @@ from scipy.signal import resample_poly
 import numpy as np
 import pandas as pd
 import os
+import shutil
 import inspect
 import re
+from typing import Sequence
 import pylops
 from pathlib import Path
+from datetime import datetime
+from uuid import uuid4
+import json
+import zarr
+from numcodecs import Blosc
+from scipy.signal import butter, sosfiltfilt, fftconvolve, chirp
 
 try:
     import cupy as cp
 except ImportError:  # pragma: no cover - optional dependency
     cp = None
+
+
+class Backend:
+    def __init__(self, name: str = "numpy"):
+        name = str(name).lower()
+        self.name = name
+        if name == "numpy":
+            import numpy as xp
+            from scipy import signal as sig
+            self.xp = xp
+            self.signal = sig
+            self.to_numpy = lambda a: a
+        elif name == "cupy":
+            try:
+                import cupy as xp
+                from cupyx.scipy import signal as sig
+            except ImportError as exc:  # pragma: no cover - optional dependency
+                raise RuntimeError("backend='cupy' requested but CuPy/cupyx.scipy is not installed") from exc
+            self.xp = xp
+            self.signal = sig
+            self.to_numpy = xp.asnumpy
+        else:
+            raise ValueError(f"Unknown backend '{name}'")
+
+    def sosfiltfilt(self, sos, x, axis=-1):
+        sig = self.signal
+        xp = self.xp
+        if hasattr(sig, "sosfiltfilt"):
+            return sig.sosfiltfilt(sos, x, axis=axis)
+        if hasattr(sig, "sosfilt"):
+            y = sig.sosfilt(sos, x, axis=axis)
+            y = sig.sosfilt(sos, xp.flip(y, axis=axis), axis=axis)
+            return xp.flip(y, axis=axis)
+        raise RuntimeError("Backend does not provide sosfiltfilt or sosfilt")
+
+
+def get_backend(backend):
+    if isinstance(backend, Backend):
+        return backend
+    return Backend(backend)
+
+
+def _reshape_kernel_for_axis_xp(w, ndim: int, axis: int, xp):
+    shape = [1] * ndim
+    shape[axis] = w.size
+    return w.reshape(shape)
+
+def load_data(context: dict, key_data: str = "data", key_geometry: str = "geometry") -> tuple:
+    """
+    Load the currently selected dataset (via context['_manifest_path']) into context.
+
+    Geometry is loaded as a DataFrame; data is kept as a Zarr array view to avoid
+    loading everything into memory.
+    """
+    manifest_path = context.get("_manifest_path")
+    if manifest_path is None or not Path(manifest_path).exists():
+        raise ValueError("load_data: context['_manifest_path'] must point to a valid manifest.")
+    meta = json.loads(Path(manifest_path).read_text())
+    geom_path = meta.get("geometry_parquet")
+    zarr_path = meta.get("zarr_store")
+    if not geom_path or not zarr_path:
+        raise ValueError("load_data: manifest missing geometry_parquet or zarr_store.")
+    context[key_geometry] = pd.read_parquet(geom_path)
+    # Keep a Zarr array view to avoid loading the entire volume into RAM
+    context[key_data] = zarr.open(zarr_path, mode="r")["amplitude"]
+    context["_geometry_path"] = geom_path
+    context["geometry_parquet"] = geom_path
+    context["zarr_store"] = zarr_path
+    return context[key_data], context[key_geometry]
 
 def kill_traces_outside_box(context, key_geometry='geometry', key_data='data', columns=['SourceX','SourceY','GroupX','GroupY']):
     """
@@ -491,6 +568,638 @@ def find_wavelet_main_lobe_center(wavelet, threshold_ratio=0.002):
 
     # print(f"✅ Wavelet main lobe: start={start}, end={end}, center={center}, length={length}")
     return wavelet, center
+
+
+def default_duration(fmin: float | None, n_cycles: float = 4.0, max_duration: float = 1.0) -> float:
+    if fmin is None or fmin <= 0:
+        return 0.5
+    return float(min(n_cycles / fmin, max_duration))
+
+
+def ricker_wavelet(dt: float, fmax: float, duration: float):
+    """
+    Zero-phase Ricker wavelet (Mexican hat) derived from a highest frequency fmax
+    using f0 = fmax / (3 * sqrt(pi)).
+    """
+    if fmax <= 0:
+        raise ValueError("ricker_wavelet requires fmax > 0.")
+    f0 = fmax / (3.0 * np.sqrt(np.pi))
+    nsamp = int(round(duration / dt))
+    if nsamp % 2 == 0:
+        nsamp += 1
+    t = (np.arange(nsamp) - nsamp // 2) * dt
+    pf2 = (np.pi * f0) ** 2
+    w = (1.0 - 2.0 * pf2 * t**2) * np.exp(-pf2 * t**2)
+    if np.max(np.abs(w)) > 0:
+        w /= np.max(np.abs(w))
+    return w, t
+
+
+def _trapezoid_spectrum(freqs, f1, f2, f3, f4):
+    amp = np.zeros_like(freqs, dtype=float)
+    m = (freqs >= f1) & (freqs < f2)
+    if f2 > f1:
+        amp[m] = (freqs[m] - f1) / (f2 - f1)
+    m = (freqs >= f2) & (freqs <= f3)
+    amp[m] = 1.0
+    m = (freqs > f3) & (freqs <= f4)
+    if f4 > f3:
+        amp[m] = (f4 - freqs[m]) / (f4 - f3)
+    return amp
+
+
+def ormsby_impulse(dt: float, duration: float, f1: float, f2: float, f3: float, f4: float):
+    nsamp = int(round(duration / dt))
+    if nsamp % 2 == 0:
+        nsamp += 1
+    freqs = np.fft.rfftfreq(nsamp, dt)
+    amp = _trapezoid_spectrum(freqs, f1, f2, f3, f4)
+    w = np.fft.irfft(amp, nsamp)
+    w = np.fft.fftshift(w)
+    if np.max(np.abs(w)) > 0:
+        w /= np.max(np.abs(w))
+    t = (np.arange(nsamp) - nsamp // 2) * dt
+    return w, t
+
+
+def ramp_impulse(dt: float, duration: float, f1: float, f2: float, f3: float):
+    nsamp = int(round(duration / dt))
+    if nsamp % 2 == 0:
+        nsamp += 1
+    freqs = np.fft.rfftfreq(nsamp, dt)
+    amp = np.zeros_like(freqs, dtype=float)
+    up = (freqs >= f1) & (freqs <= f2)
+    if f2 > f1:
+        amp[up] = (freqs[up] - f1) / (f2 - f1)
+    down = (freqs > f2) & (freqs <= f3)
+    if f3 > f2:
+        amp[down] = (f3 - freqs[down]) / (f3 - f2)
+    w = np.fft.irfft(amp, nsamp)
+    w = np.fft.fftshift(w)
+    if np.max(np.abs(w)) > 0:
+        w /= np.max(np.abs(w))
+    t = (np.arange(nsamp) - nsamp // 2) * dt
+    return w, t
+
+
+def klauder_wavelet(dt: float, f1: float, f2: float, duration: float):
+    nsamp = int(round(duration / dt))
+    if nsamp < 2:
+        nsamp = 2
+    t_sweep = np.arange(nsamp) * dt
+    sweep = chirp(t_sweep, f0=f1, f1=f2, t1=duration, method="linear")
+    spec = np.fft.rfft(sweep)
+    ac = np.fft.irfft(np.abs(spec) ** 2)
+    ac = np.fft.fftshift(ac)
+    if np.max(np.abs(ac)) > 0:
+        ac /= np.max(np.abs(ac))
+    t_ac = (np.arange(ac.size) - ac.size // 2) * dt
+    return ac, t_ac
+
+
+def bandpass(
+    trace,
+    dt: float,
+    method: str = "butterworth",
+    fmin: float | None = None,
+    fmax: float | None = None,
+    duration: float | None = None,
+    order: int = 4,
+    f1: float | None = None,
+    f2: float | None = None,
+    f3: float | None = None,
+    f4: float | None = None,
+    corners: tuple | list | None = None,
+    filter_type: str = "bandpass",
+    axis: int = 0,
+    backend: str | Backend = "numpy",
+):
+    bk = get_backend(backend)
+    xp = bk.xp
+    sig = bk.signal
+
+    x = xp.asarray(trace, dtype=xp.float32)
+    nyq = 0.5 / dt
+    method = method.lower()
+    ndim = x.ndim
+    if method == "butterworth":
+        shape = (filter_type or "bandpass").lower()
+        if shape == "lowpass":
+            if fmax is None:
+                raise ValueError("Butterworth lowpass requires fmax.")
+            high = fmax / nyq
+            if not (0.0 < high < 1.0):
+                raise ValueError("Butterworth band must be within (0, Nyquist).")
+            sos = sig.butter(order, high, btype="low", output="sos")
+        elif shape == "highpass":
+            if fmin is None:
+                raise ValueError("Butterworth highpass requires fmin.")
+            low = fmin / nyq
+            if not (0.0 < low < 1.0):
+                raise ValueError("Butterworth band must be within (0, Nyquist).")
+            sos = sig.butter(order, low, btype="high", output="sos")
+        else:  # bandpass default
+            if fmin is None or fmax is None:
+                raise ValueError("Butterworth bandpass requires fmin and fmax.")
+            low = fmin / nyq
+            high = fmax / nyq
+            if not (0.0 < low < high < 1.0):
+                raise ValueError("Butterworth band must be within (0, Nyquist).")
+            sos = sig.butter(order, [low, high], btype="band", output="sos")
+        return bk.sosfiltfilt(sos, x, axis=axis)
+    if duration is None:
+        if method in {"ormsby", "ramp"}:
+            if f2 is not None:
+                f_rep = f2
+            elif f1 is not None:
+                f_rep = f1
+            elif corners is not None and len(corners) > 1:
+                f_rep = corners[1]
+            else:
+                f_rep = None
+        elif method == "ricker" and fmax is not None:
+            f_rep = fmax
+        elif fmin is not None:
+            f_rep = fmin
+        else:
+            f_rep = None
+        duration = default_duration(f_rep)
+    if method == "ormsby":
+        if corners is None:
+            if None in (f1, f2, f3, f4):
+                raise ValueError("Ormsby requires f1, f2, f3, f4.")
+            corners = (f1, f2, f3, f4)
+        f1, f2, f3, f4 = corners
+        w_np, _ = ormsby_impulse(dt, duration, f1, f2, f3, f4)
+        w = xp.asarray(w_np, dtype=xp.float32)
+        if x.ndim == 1:
+            return sig.fftconvolve(x, w, mode="same")
+        w_nd = _reshape_kernel_for_axis_xp(w, ndim, axis, xp)
+        return sig.fftconvolve(x, w_nd, mode="same")
+    if method == "ricker":
+        if fmax is None:
+            if fmin is not None:
+                fmax = fmin
+            else:
+                raise ValueError("Ricker requires fmax.")
+        w_np, _ = ricker_wavelet(dt, fmax, duration)
+        w = xp.asarray(w_np, dtype=xp.float32)
+        if x.ndim == 1:
+            return sig.fftconvolve(x, w, mode="same")
+        w_nd = _reshape_kernel_for_axis_xp(w, ndim, axis, xp)
+        return sig.fftconvolve(x, w_nd, mode="same")
+    if method == "klauder":
+        if fmin is not None and fmax is not None:
+            f1, f2 = fmin, fmax
+        elif corners is not None and len(corners) >= 2:
+            f1, f2 = corners[0], corners[1]
+        else:
+            raise ValueError("Klauder requires fmin/fmax or first two corners.")
+        w_np, _ = klauder_wavelet(dt, f1, f2, duration)
+        w = xp.asarray(w_np, dtype=xp.float32)
+        if x.ndim == 1:
+            return sig.fftconvolve(x, w, mode="same")
+        w_nd = _reshape_kernel_for_axis_xp(w, ndim, axis, xp)
+        return sig.fftconvolve(x, w_nd, mode="same")
+    if method == "ramp":
+        if corners is None:
+            if None in (f1, f2, f3):
+                raise ValueError("Ramp requires f1, f2, f3.")
+            corners = (f1, f2, f3)
+        f1, f2, f3 = corners
+        w_np, _ = ramp_impulse(dt, duration, f1, f2, f3)
+        w = xp.asarray(w_np, dtype=xp.float32)
+        if x.ndim == 1:
+            return sig.fftconvolve(x, w, mode="same")
+        w_nd = _reshape_kernel_for_axis_xp(w, ndim, axis, xp)
+        return sig.fftconvolve(x, w_nd, mode="same")
+    raise ValueError(f"Unknown method '{method}'")
+
+
+def filter_bandpass_zarr_array(
+    zin,
+    dt: float,
+    method: str = "butterworth",
+    axis: int = 0,
+    out=None,
+    trace_block: int | None = None,
+    backend: str | Backend = "numpy",
+    **bp_kwargs,
+):
+    """
+    Apply bandpass() to a large Zarr array in blocks (trace-wise) to avoid loading all data.
+
+    Parameters
+    ----------
+    zin : zarr.Array or array-like
+        Expected shape (nt, ntraces) with time on axis 0.
+    dt : float
+        Sample interval [s].
+    method : str
+        Filter method passed to bandpass.
+    axis : int
+        Time axis (only axis=0 supported in this helper).
+    out : zarr.Array or None
+        Optional destination; if None a NumPy array is returned (not recommended for huge data).
+    trace_block : int or None
+        Number of traces per block; defaults to zin.chunks[1] when available or 1024.
+    backend : {'numpy', 'cupy', Backend}
+        Compute backend for filtering.
+    bp_kwargs : dict
+        Extra args passed to bandpass (fmin/fmax/etc).
+    """
+    if axis != 0:
+        raise NotImplementedError("filter_bandpass_zarr_array currently supports axis=0 (time) only.")
+    nt, ntr = zin.shape
+    if trace_block is None:
+        try:
+            trace_block = zin.chunks[1]
+        except Exception:
+            trace_block = 1024
+    if out is None:
+        out = np.empty((nt, ntr), dtype=np.float32)
+
+    start = 0
+    while start < ntr:
+        stop = min(start + trace_block, ntr)
+        block = np.asarray(zin[:, start:stop], dtype=np.float32)
+        filt_block = bandpass(
+            block,
+            dt=dt,
+            method=method,
+            axis=axis,
+            backend=backend,
+            **bp_kwargs,
+        )
+        filt_block = get_backend(backend).to_numpy(filt_block).astype(np.float32, copy=False)
+        out[:, start:stop] = filt_block
+        start = stop
+
+    return out
+
+
+def filter(
+    context: dict,
+    method: str = "butterworth",
+    fmin: float | None = None,
+    fmax: float | None = None,
+    order: int = 4,
+    f1: float | None = None,
+    f2: float | None = None,
+    f3: float | None = None,
+    f4: float | None = None,
+    corners: tuple | list | None = None,
+    filter_type: str = "bandpass",
+    axis: int = 0,
+    key_data: str = "data",
+    output_key: str | None = None,
+    trace_block: int | None = None,
+    out_zarr: str | None = None,
+):
+    data = context.get(key_data)
+    if data is None:
+        raise ValueError("filter: 'data' missing.")
+    dt_val = context.get("z_increment", context.get("z_inc", None))
+    if dt_val is not None:
+        dt_val = float(dt_val) / 1000.0
+    else:
+        dt_val = context.get("dt", None)
+    if dt_val is None:
+        raise ValueError("filter: dt missing; ensure context has z_increment/z_inc or dt.")
+
+    def _to_float(val):
+        if val is None:
+            return None
+        if isinstance(val, str) and val.strip() == "":
+            return None
+        try:
+            return float(val)
+        except Exception:
+            return None
+
+    fmin_val = _to_float(fmin)
+    fmax_val = _to_float(fmax)
+    f1_val = _to_float(f1)
+    f2_val = _to_float(f2)
+    f3_val = _to_float(f3)
+    f4_val = _to_float(f4)
+    if method == "butterworth" and (fmin_val is None or fmin_val <= 0):
+        fmin_val = 1e-6
+
+    try:
+        import zarr as _z
+    except Exception:
+        _z = None
+
+    # Zarr path: stream to new zarr on disk
+    if _z is not None and isinstance(data, _z.core.Array):
+        manifest_path = context.get("_manifest_path")
+        if manifest_path is None:
+            raise ValueError("filter: Zarr input detected but no manifest path in context.")
+        src_path = context.get("zarr_store")
+        base_name = Path(src_path).stem if src_path else "filtered"
+        bin_dir = Path(manifest_path).parent
+        allow_overwrite = bool(context.get("allow_overwrite", False))
+        if out_zarr:
+            out_path = Path(out_zarr)
+            if not out_path.is_absolute():
+                out_path = bin_dir / out_path
+        else:
+            out_path = bin_dir / f"{base_name}_filtered.zarr"
+        if out_path.exists() and not allow_overwrite:
+            idx = 1
+            base = out_path.with_suffix("")
+            suffix = out_path.suffix
+            while True:
+                cand = Path(f"{base}_v{idx}{suffix}")
+                if not cand.exists():
+                    out_path = cand
+                    break
+                idx += 1
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        compressor = Blosc(cname="zstd", clevel=5, shuffle=Blosc.SHUFFLE)
+        chunks = getattr(data, "chunks", None)
+        if chunks is None or len(chunks) < 2:
+            chunks = (data.shape[0], min(512, data.shape[1]))
+        root = zarr.open(out_path, mode="w" if allow_overwrite else "w-")
+        out_arr = root.create_dataset(
+            "amplitude",
+            shape=data.shape,
+            chunks=chunks,
+            dtype=np.float32,
+            compressor=compressor,
+        )
+        out_arr.attrs["_ARRAY_DIMENSIONS"] = ["sample", "trace"]
+        filter_bandpass_zarr_array(
+            data,
+            dt=dt_val,
+            method=method,
+            axis=axis,
+            out=out_arr,
+            trace_block=trace_block,
+            fmin=fmin_val,
+            fmax=fmax_val,
+            f1=f1_val,
+            f2=f2_val,
+            f3=f3_val,
+            f4=f4_val,
+            corners=corners,
+            filter_type=filter_type,
+            order=order,
+        )
+        geom_path = context.get("geometry_parquet") or context.get("_geometry_path", "")
+        base_meta = {}
+        try:
+            base_meta = json.loads(Path(manifest_path).read_text())
+        except Exception:
+            base_meta = {}
+        manifest = {
+            "dataset_id": str(uuid4()),
+            "parent_store": str(src_path) if src_path else "",
+            "zarr_store": str(out_path.resolve()),
+            "geometry_parquet": str(Path(geom_path).resolve()) if geom_path else "",
+            "dataset_type": base_meta.get("dataset_type", context.get("dataset_type", "")) or "",
+            "trace_count": int(data.shape[1]),
+            "samples": int(data.shape[0]),
+            "chunk_trace": int(chunks[1] if len(chunks) > 1 else data.shape[1]),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "selected_headers": base_meta.get("selected_headers", {}) or {},
+        }
+        manifest_path_out = Path(str(out_path) + ".manifest.json")
+        manifest_path_out.write_text(json.dumps(manifest, indent=2))
+        context["data"] = zarr.open(out_path, mode="r")["amplitude"]
+        context["zarr_store"] = str(out_path.resolve())
+        context["_manifest_path"] = str(manifest_path_out.resolve())
+        context["geometry_parquet"] = str(Path(geom_path).resolve()) if geom_path else context.get("geometry_parquet")
+        return context["data"]
+
+    if not isinstance(data, np.ndarray):
+        raise ValueError("filter: 'data' missing or not array.")
+    try:
+        filtered = np.apply_along_axis(
+            lambda tr: bandpass(
+                tr,
+                dt_val,
+                method=method,
+                fmin=fmin_val,
+                fmax=fmax_val,
+                order=order,
+                f1=f1_val,
+                f2=f2_val,
+                f3=f3_val,
+                f4=f4_val,
+                corners=corners,
+                filter_type=filter_type,
+            ),
+            axis,
+            data,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"filter failed: {exc}") from exc
+    context[output_key or key_data] = filtered
+    return filtered
+
+
+def save_dataset(
+    context: dict,
+    out_zarr: str | Path,
+    key_data: str = "data",
+    key_geometry: str = "geometry_parquet",
+    allow_overwrite: bool = False,
+) -> str:
+    """
+    Persist a dataset in the context to a new Zarr store, reusing an existing
+    geometry parquet path from the context.
+
+    If data is already a Zarr array, this will rename/move the store to the
+    requested out_zarr (if different). If out_zarr matches the current store,
+    it becomes a no-op.
+
+    key_data points to the numpy array to save, key_geometry points to the
+    parquet path (or context entries _geometry_path / geometry_parquet fallback).
+    """
+    data = context.get(key_data)
+    try:
+        import zarr as _z
+    except Exception:
+        _z = None
+    if data is None:
+        raise ValueError("save_dataset: 'data' missing.")
+    if _z is not None and isinstance(data, _z.core.Array):
+        # Already on disk; optionally rename/move to requested out_zarr
+        current_store = context.get("zarr_store")
+        current_manifest = context.get("_manifest_path")
+        if current_store is None or current_manifest is None:
+            raise ValueError("save_dataset: zarr data present but missing zarr_store/_manifest_path in context.")
+        target = Path(out_zarr)
+        if not target.is_absolute():
+            bin_dir = Path(current_manifest).parent
+            target = bin_dir / target
+        if Path(current_store).resolve() == target.resolve():
+            return str(target.resolve())
+        if target.exists():
+            if not allow_overwrite:
+                raise FileExistsError(f"{target} exists. Set allow_overwrite=True to replace.")
+            # remove existing target
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # move store
+        shutil.move(str(current_store), str(target))
+        # update manifest
+        manifest_path_old = Path(str(current_store) + ".manifest.json")
+        manifest_path_new = Path(str(target) + ".manifest.json")
+        try:
+            meta = json.loads(manifest_path_old.read_text())
+            meta["zarr_store"] = str(target.resolve())
+            manifest_path_new.write_text(json.dumps(meta, indent=2))
+            # remove old manifest if different
+            if manifest_path_new.resolve() != manifest_path_old.resolve():
+                manifest_path_old.unlink(missing_ok=True)
+        except Exception:
+            pass
+        context["zarr_store"] = str(target.resolve())
+        context["_manifest_path"] = str(manifest_path_new.resolve())
+        return str(target.resolve())
+    if not isinstance(data, np.ndarray):
+        raise ValueError("save_dataset: data must be numpy array or zarr array.")
+    if data.ndim != 2:
+        raise ValueError("save_dataset: data must be 2D (samples x traces).")
+
+    geom_val = None
+    for candidate_key in (key_geometry, "_geometry_path", "geometry_parquet"):
+        candidate = context.get(candidate_key)
+        if isinstance(candidate, (str, Path)):
+            geom_val = candidate
+            break
+        if candidate is not None and not isinstance(candidate, (str, Path)):
+            # skip non-path values (e.g., DataFrame) silently and keep searching
+            continue
+    if geom_val is None:
+        raise ValueError("save_dataset: geometry path not found; provide key_geometry or load manifest first.")
+    geom_path = Path(geom_val)
+    if not geom_path.exists():
+        raise FileNotFoundError(f"Geometry file not found: {geom_path}")
+
+    parent_store = context.get("zarr_store")
+    # Inherit metadata from source manifest if available
+    base_meta = {}
+    manifest_src = context.get("_manifest_path")
+    if manifest_src and Path(manifest_src).exists():
+        try:
+            base_meta = json.loads(Path(manifest_src).read_text())
+        except Exception:
+            base_meta = {}
+    base_selected = base_meta.get("selected_headers", {}) if isinstance(base_meta, dict) else {}
+    base_chunk = base_meta.get("chunk_trace", None) if isinstance(base_meta, dict) else None
+    base_dtype = base_meta.get("dataset_type", "") if isinstance(base_meta, dict) else ""
+
+    dataset_type = context.get("dataset_type", "") or base_dtype or ""
+    if not isinstance(allow_overwrite, bool):
+        allow_overwrite = bool(allow_overwrite)
+    if manifest_src:
+        bin_dir = Path(manifest_src).parent
+    else:
+        raise ValueError("save_dataset: missing survey manifest path; load a dataset before saving.")
+    out_name = Path(out_zarr).name
+    out_zarr = bin_dir / out_name
+    if out_zarr.exists() and not allow_overwrite:
+        raise FileExistsError(f"{out_zarr} exists. Set allow_overwrite=True to replace.")
+    out_zarr.parent.mkdir(parents=True, exist_ok=True)
+
+    n_samples, n_traces = data.shape
+    trace_ids = context.get("trace_ids")
+    if trace_ids is None:
+        geom_df = context.get("geometry")
+        if isinstance(geom_df, pd.DataFrame):
+            if len(geom_df) == n_traces:
+                # geometry already aligned with data
+                if "trace_id" in geom_df.columns:
+                    trace_ids = geom_df["trace_id"].to_numpy()
+                else:
+                    trace_ids = np.arange(n_traces, dtype=np.int64)
+            else:
+                # cannot infer mapping for subset without explicit trace_ids
+                raise ValueError(
+                    "save_dataset: trace_ids missing for subset data; "
+                    "provide context['trace_ids'] mapping to geometry rows."
+                )
+    if trace_ids is not None:
+        trace_ids = np.asarray(trace_ids, dtype=np.int64)
+        if trace_ids.shape[0] != n_traces:
+            raise ValueError("trace_ids length must match number of traces in data.")
+
+    chunk_trace = int(context.get("chunk_trace", base_chunk if base_chunk else min(n_traces, 512)))
+    compressor_val = context.get("compressor")
+    compressor = compressor_val if isinstance(compressor_val, Blosc) else Blosc(cname="zstd", clevel=5, shuffle=Blosc.SHUFFLE)
+
+    root = zarr.open(out_zarr, mode="w-" if not allow_overwrite else "w")
+    root.attrs.update(
+        {
+            "description": "Filtered seismic amplitude",
+            "parent_store": str(parent_store) if parent_store else "",
+            "geometry_parquet": str(geom_path.resolve()),
+            "dataset_type": dataset_type,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+    )
+
+    if trace_ids is not None:
+        root.create_dataset(
+            "trace_ids",
+            data=trace_ids,
+            shape=trace_ids.shape,
+            chunks=(min(len(trace_ids), chunk_trace),),
+            dtype="int64",
+        )
+
+    amp_ds = root.create_dataset(
+        "amplitude",
+        shape=(n_samples, n_traces),
+        chunks=(n_samples, min(chunk_trace, n_traces)),
+        dtype="float32",
+        compressor=compressor,
+    )
+    amp_ds.attrs["_ARRAY_DIMENSIONS"] = ["sample", "trace"]
+
+    # copy in manageable blocks along trace dimension
+    block = 4096
+    if isinstance(data, np.ndarray):
+        for start in range(0, n_traces, block):
+            end = min(start + block, n_traces)
+            amp_ds[:, start:end] = data[:, start:end]
+    else:
+        # zarr -> zarr copy
+        for start in range(0, n_traces, block):
+            end = min(start + block, n_traces)
+            amp_ds[:, start:end] = np.asarray(data[:, start:end], dtype=np.float32)
+
+    manifest = {
+        "dataset_id": str(uuid4()),
+        "parent_store": str(parent_store) if parent_store else "",
+        "zarr_store": str(out_zarr.resolve()),
+        "geometry_parquet": str(geom_path.resolve()),
+        "dataset_type": dataset_type,
+        "trace_count": int(n_traces),
+        "samples": int(n_samples),
+        "chunk_trace": int(chunk_trace),
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+    if trace_ids is not None:
+        manifest["trace_ids_dataset"] = True
+    if base_selected:
+        manifest["selected_headers"] = base_selected
+
+    manifest_path = Path(str(out_zarr) + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    context["zarr_store"] = str(out_zarr.resolve())
+    context["geometry_parquet"] = str(geom_path.resolve())
+    return str(out_zarr.resolve())
+
+
 def calculate_convolution_operator(context, key="data", threshold_ratio=0.002):
     wavelet = context.get(key)
 
@@ -588,6 +1297,110 @@ def apply_designature(context, key_input="wavelet_input", key_output="wavelet_ou
     except Exception as e:
         print(f"❌ Failed to apply designature: {e}")
         return None
+
+
+def apply_deghost(
+    context: dict,
+    ffid_header: str = "FFID",
+    velocity: float = 1500.0,
+    dz: float = 12.5,
+    dt: float | None = None,
+    pad: int = 30,
+    npad: int = 5,
+    ntaper: int = 11,
+    key_data: str = "data",
+    key_geometry: str = "geometry",
+    output_key: str | None = None,
+):
+    """Apply receiver-side deghosting gather-by-gather using pylops.waveeqprocessing.Deghosting."""
+    data = context.get(key_data)
+    geom = context.get(key_geometry)
+    if data is None or not isinstance(data, np.ndarray):
+        raise ValueError("apply_deghost: 'data' missing or not numpy array.")
+    if geom is None or not isinstance(geom, pd.DataFrame):
+        raise ValueError("apply_deghost: 'geometry' missing or not DataFrame.")
+    required = [ffid_header, "GroupX", "GroupY", "SourceX", "SourceY"]
+    missing = [c for c in required if c not in geom.columns]
+    if missing:
+        raise ValueError(f"apply_deghost: missing geometry columns {missing}")
+    # Derive dt from context z_increment (ms) if not provided
+    if dt is None:
+        dt_ms = context.get("z_increment", context.get("z_inc", None))
+        if dt_ms is not None:
+            dt_sec = float(dt_ms) / 1000.0
+        else:
+            dt_sec = context.get("dt", 0.001)
+    else:
+        dt_sec = dt
+    out = np.zeros_like(data)
+    ffids = geom[ffid_header].to_numpy()
+    unique_ffids = np.unique(ffids)
+
+    for ffid in unique_ffids:
+        mask = ffids == ffid
+        if not mask.any():
+            continue
+        gather_idx = geom.index[mask].to_numpy()
+        sis = data[:, gather_idx]
+        if pad and pad > 0:
+            sis = np.pad(sis, pad_width=pad, mode="edge")
+        r = np.asarray([geom.loc[mask, "GroupX"].to_numpy(), geom.loc[mask, "GroupY"].to_numpy()])
+        s = np.asarray([geom.loc[mask, "SourceX"].to_numpy(), geom.loc[mask, "SourceY"].to_numpy()])
+        nr = r.shape[1]
+        if nr < 2:
+            out[:, gather_idx] = data[:, gather_idx]
+            continue
+        dr = float(np.mean(np.diff(r[0])))
+        win = np.ones_like(sis)
+        taper = min(ntaper, max(1, nr // 2))
+
+        arr_mod = cp if cp is not None else np
+        sis_arr = arr_mod.asarray(sis)
+        win_arr = arr_mod.asarray(win)
+        zeros_arr = arr_mod.zeros_like(sis_arr).ravel()
+
+        try:
+            res = pylops.waveeqprocessing.Deghosting(
+                sis_arr,
+                sis_arr.shape[0],
+                sis_arr.shape[1],
+                dt_sec,
+                dr,
+                velocity,
+                r[1, 0] + dz,
+                win=win_arr,
+                npad=npad,
+                ntaper=taper,
+                solver=pylops.optimization.basic.cgls,
+                dottest=False,
+                dtype="complex128",
+                **dict(x0=zeros_arr, damp=1e-0, niter=60),
+            )
+            down = res[1]
+            if cp is not None and hasattr(down, "get"):
+                down = down.get()
+        except Exception as exc:
+            raise RuntimeError(f"Deghosting failed for FFID {ffid}: {exc}") from exc
+        finally:
+            if cp is not None:
+                try:
+                    del sis_arr, win_arr, zeros_arr, res
+                except Exception:
+                    pass
+                try:
+                    cp.get_default_memory_pool().free_all_blocks()
+                    cp.get_default_pinned_memory_pool().free_all_blocks()
+                    cp.fft.config.clear_plan_cache()
+                except Exception:
+                    pass
+
+        if pad and pad > 0:
+            down = down[pad:-pad, pad:-pad]
+        down = np.asarray(down, dtype=np.float32)
+        out[:, gather_idx] = down
+
+    context[output_key or key_data] = out
+    return out
 def sort(context, header1, header2=None, key_data="data", key_geometry="geometry"):
     df = context.get(key_geometry)
     data = context.get(key_data)

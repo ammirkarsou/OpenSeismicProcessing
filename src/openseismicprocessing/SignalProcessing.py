@@ -18,13 +18,18 @@ from .processing import (
     sort,
     create_header,
     save_header,
+    save_dataset,
     zero_phase_wavelet,
+    apply_deghost,
+    filter,
     calculate_convolution_operator,
     apply_designature,
     subset_geometry_by_condition,
     scale_coordinate_units,
     generate_local_coordinates,
-    kill_traces_outside_box
+    kill_traces_outside_box,
+    load_data,
+    filter_bandpass_zarr_array,
 )
 
 from .pipeline import (
@@ -61,7 +66,8 @@ __all__ = [
 
     # Processing
     "resample", "stack_data_along_axis", "mute_data", "trim_samples", "sort",
-    "create_header", "save_header", "zero_phase_wavelet", "calculate_convolution_operator", "apply_designature",
+    "create_header", "save_header", "zero_phase_wavelet", "calculate_convolution_operator", "apply_designature", "apply_deghost", "filter",
+    "save_dataset", "load_data", "filter_bandpass_zarr_array",
     "subset_geometry_by_condition", "scale_coordinate_units", "generate_local_coordinates",
     "kill_traces_outside_box",
 

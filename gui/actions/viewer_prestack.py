@@ -117,17 +117,21 @@ class PrestackViewer(QtWidgets.QWidget):
         self.placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         right.addWidget(self.placeholder)
 
-        self.figure = Figure(figsize=(8, 6))
+        self.figure = Figure(figsize=(10, 8), constrained_layout=True)
         self.canvas = FigureCanvas(self.figure)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
 
-        self.spectrum_fig = Figure(figsize=(6, 3))
+        self.spectrum_fig = Figure(figsize=(6, 3), constrained_layout=True)
         self.spectrum_canvas = FigureCanvas(self.spectrum_fig)
         self.spectrum_canvas.setVisible(False)
 
         plots_row = QtWidgets.QHBoxLayout()
-        plots_row.addWidget(self.canvas, 2)
+        main_plot_col = QtWidgets.QVBoxLayout()
+        main_plot_col.addWidget(self.toolbar)
+        main_plot_col.addWidget(self.canvas, 1)
+        plots_row.addLayout(main_plot_col, 5)
         plots_row.addWidget(self.spectrum_canvas, 1)
-        self.autocorr_fig = Figure(figsize=(6, 3))
+        self.autocorr_fig = Figure(figsize=(6, 3), constrained_layout=True)
         self.autocorr_canvas = FigureCanvas(self.autocorr_fig)
         self.autocorr_canvas.setVisible(False)
         plots_row.addWidget(self.autocorr_canvas, 1)
@@ -224,7 +228,23 @@ class PrestackViewer(QtWidgets.QWidget):
             return
         try:
             self.geom_df = pd.read_parquet(geom_path)
-            self.amp = zarr.open(zarr_path, mode="r")["amplitude"]
+            store = zarr.open(zarr_path, mode="r")
+            self.amp = store["amplitude"]
+            trace_ids_ds = store.get("trace_ids")
+            if trace_ids_ds is not None:
+                ids = np.asarray(trace_ids_ds[:], dtype=np.int64)
+                if "trace_id" in self.geom_df.columns:
+                    try:
+                        self.geom_df = (
+                            self.geom_df.set_index("trace_id")
+                            .loc[ids]
+                            .reset_index()
+                        )
+                    except Exception:
+                        # fallback to iloc if loc fails
+                        self.geom_df = self.geom_df.iloc[ids]
+                else:
+                    self.geom_df = self.geom_df.iloc[ids]
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Pre-stack Viewer", f"Failed to load data:\n{exc}")
             return
@@ -322,10 +342,15 @@ class PrestackViewer(QtWidgets.QWidget):
             origin="upper",
             interpolation="none",
         )
+        ax.margins(0)
         ax.set_xlabel(header2)
         ax.set_ylabel("Time (ms)")
-        ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Amplitude")
+        ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.02, label="Amplitude")
         ax.set_title(f"{header1} = {target}")
+        try:
+            self.figure.tight_layout(pad=0.3)
+        except Exception:
+            pass
         self.canvas.draw_idle()
 
     def _clear_map(self):

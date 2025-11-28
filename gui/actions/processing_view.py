@@ -61,6 +61,11 @@ class ProcessingDiagram(QtWidgets.QGraphicsView):
         self._set_selected_box(hit)
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        super().mouseReleaseEvent(event)
+        # After a drag, snap boxes to ordered vertical layout based on y
+        self._normalize_layout()
+
     def _set_selected_box(self, box: QtWidgets.QGraphicsRectItem | None):
         self._selected_box = box
         for b, _ in self._boxes:
@@ -97,10 +102,25 @@ class ProcessingDiagram(QtWidgets.QGraphicsView):
         dlg.line_edit = line_edit
         return dlg
 
+    class _DraggableRect(QtWidgets.QGraphicsRectItem):
+        def __init__(self, rect, move_cb):
+            super().__init__(rect)
+            self._move_cb = move_cb
+            self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+            self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+
+        def itemChange(self, change, value):
+            if change == QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and callable(self._move_cb):
+                self._move_cb()
+            return super().itemChange(change, value)
+
     def _add_box(self, label: str):
         rect = QtCore.QRectF(QtCore.QPointF(0, 0), self._box_size)
-        box = self.scene.addRect(rect, pen=QtGui.QPen(QtCore.Qt.GlobalColor.black, 2), brush=QtGui.QBrush(QtCore.Qt.GlobalColor.white))
-        text = self.scene.addText(label)
+        box = ProcessingDiagram._DraggableRect(rect, self._update_arrows)
+        box.setPen(QtGui.QPen(QtCore.Qt.GlobalColor.black, 2))
+        box.setBrush(QtGui.QBrush(QtCore.Qt.GlobalColor.white))
+        self.scene.addItem(box)
+        text = QtWidgets.QGraphicsTextItem(label, box)
         text.setDefaultTextColor(QtCore.Qt.GlobalColor.black)
         self._boxes.append((box, text))
 
@@ -121,29 +141,39 @@ class ProcessingDiagram(QtWidgets.QGraphicsView):
         self._reflow()
 
     def _reflow(self):
-        # Position boxes vertically and rebuild arrows
+        self._normalize_layout()
+
+    def _normalize_layout(self):
+        # Sort by vertical position, then snap to a tidy vertical stack
+        if not self._boxes:
+            return
+        selected = self._selected_box
+        self._boxes.sort(key=lambda bt: bt[0].scenePos().y())
         y = 20.0
         x = 150.0
         for box, text in self._boxes:
-            rect = QtCore.QRectF(QtCore.QPointF(x, y), self._box_size)
-            box.setRect(rect)
+            box.setPos(QtCore.QPointF(x, y))
+            rect = box.rect()
             text_rect = text.boundingRect()
             text.setPos(
                 rect.center().x() - text_rect.width() / 2,
                 rect.center().y() - text_rect.height() / 2,
             )
             y += self._vertical_spacing
+        self._update_arrows()
+        if selected is not None:
+            self._set_selected_box(selected)
+
+    def _update_arrows(self):
         for arrow in self._arrows:
             self.scene.removeItem(arrow)
         self._arrows.clear()
 
         def center_bottom(box: QtWidgets.QGraphicsRectItem) -> QtCore.QPointF:
-            r = box.rect()
-            return QtCore.QPointF(r.center().x(), r.bottom())
+            return box.mapToScene(box.rect().center() + QtCore.QPointF(0, box.rect().height() / 2))
 
         def center_top(box: QtWidgets.QGraphicsRectItem) -> QtCore.QPointF:
-            r = box.rect()
-            return QtCore.QPointF(r.center().x(), r.top())
+            return box.mapToScene(box.rect().center() - QtCore.QPointF(0, box.rect().height() / 2))
 
         import math
 
@@ -170,6 +200,25 @@ class ProcessingDiagram(QtWidgets.QGraphicsView):
             head = self.scene.addPolygon(poly, pen=QtGui.QPen(QtCore.Qt.GlobalColor.black, 2), brush=QtGui.QBrush(QtCore.Qt.GlobalColor.black))
             self._arrows.extend([line, head])
         self.scene.setSceneRect(self.scene.itemsBoundingRect().marginsAdded(QtCore.QMarginsF(50, 50, 50, 50)))
+
+    def set_boxes(self, labels: list[str]):
+        # Remove existing items
+        for b, t in self._boxes:
+            self.scene.removeItem(b)
+            self.scene.removeItem(t)
+        for arrow in self._arrows:
+            self.scene.removeItem(arrow)
+        self._boxes.clear()
+        self._arrows.clear()
+        self._selected_box = None
+        if not labels:
+            labels = [""]
+        for lbl in labels:
+            self._add_box(lbl)
+        self._normalize_layout()
+        if self._boxes:
+            self._set_selected_box(self._boxes[0][0])
+
 
     def set_boxes(self, labels: list[str]):
         # Remove existing items
@@ -310,11 +359,19 @@ class ProcessingPanel(QtWidgets.QWidget):
         self._render_params(box, current_label)
 
     def _clear_params(self):
-        while self.params_layout.count():
-            item = self.params_layout.takeAt(0)
+        def clear_item(item):
+            if item is None:
+                return
             w = item.widget()
             if w:
                 w.deleteLater()
+            else:
+                child_layout = item.layout()
+                if child_layout:
+                    while child_layout.count():
+                        clear_item(child_layout.takeAt(0))
+        while self.params_layout.count():
+            clear_item(self.params_layout.takeAt(0))
 
     def _render_params(self, box, label: str):
         self._clear_params()
@@ -330,14 +387,100 @@ class ProcessingPanel(QtWidgets.QWidget):
         # Skip context arg
         params = [p for p in sig.parameters.values() if p.name != "context"]
         stored = self._params_by_box.setdefault(box, {})
-        for p in params:
-            le = QtWidgets.QLineEdit()
-            if p.name in stored:
-                le.setText(stored[p.name])
-            elif p.default is not inspect._empty:
-                le.setText(str(p.default))
-            le.textChanged.connect(lambda text, name=p.name, b=box: self._save_param(b, name, text))
-            self.params_layout.addRow(f"{p.name}:", le)
+        if label == "filter":
+            method_combo = QtWidgets.QComboBox()
+            methods = ["butterworth", "ormsby", "ricker", "klauder", "ramp"]
+            method_combo.addItems(methods)
+            if stored.get("method") in methods:
+                method_combo.setCurrentText(stored["method"])
+            else:
+                method_combo.setCurrentIndex(0)
+            method_combo.currentTextChanged.connect(lambda text, b=box: self._save_param(b, "method", text))
+
+            pass_combo = QtWidgets.QComboBox()
+            pass_types = ["bandpass", "lowpass", "highpass"]
+            pass_combo.addItems(pass_types)
+            if stored.get("filter_type") in pass_types:
+                pass_combo.setCurrentText(stored["filter_type"])
+            pass_combo.currentTextChanged.connect(lambda text, b=box: self._save_param(b, "filter_type", text))
+
+            method_row = QtWidgets.QWidget()
+            h = QtWidgets.QHBoxLayout(method_row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.addWidget(method_combo)
+            h.addWidget(pass_combo)
+            self.params_layout.addRow("method / type:", method_row)
+
+            # create entries for other params
+            widgets = {}
+            def add_field(name, default_val=""):
+                le = QtWidgets.QLineEdit()
+                val = stored.get(name)
+                if val is not None:
+                    le.setText(str(val))
+                elif default_val != "":
+                    le.setText(str(default_val))
+                le.textChanged.connect(lambda text, n=name, b=box: self._save_param(b, n, text))
+                self.params_layout.addRow(f"{name}:", le)
+                widgets[name] = le
+            for p in ["fmin", "fmax", "f1", "f2", "f3", "f4", "order", "axis", "key_data", "output_key", "out_zarr", "trace_block"]:
+                default_val = ""
+                if p == "order":
+                    default_val = 4
+                elif p == "axis":
+                    default_val = 0
+                elif p == "key_data":
+                    default_val = "data"
+                elif p == "trace_block":
+                    default_val = 4096
+                elif p == "out_zarr":
+                    default_val = ""
+                add_field(p, default_val)
+
+            backend_combo = QtWidgets.QComboBox()
+            backend_combo.addItems(["numpy", "cupy"])
+            if stored.get("backend") in {"numpy", "cupy"}:
+                backend_combo.setCurrentText(stored["backend"])
+            backend_combo.currentTextChanged.connect(lambda text, b=box: self._save_param(b, "backend", text))
+            self.params_layout.addRow("backend:", backend_combo)
+
+            def toggle_fields():
+                method = method_combo.currentText()
+                ptype = pass_combo.currentText()
+                show = {
+                    "butterworth": {"order", "axis", "key_data", "output_key", "trace_block"},
+                    "ormsby": {"f1", "f2", "f3", "f4", "axis", "key_data", "output_key", "trace_block"},
+                    "ricker": {"fmin", "fmax", "axis", "key_data", "output_key", "trace_block"},
+                    "klauder": {"fmin", "fmax", "axis", "key_data", "output_key", "trace_block"},
+                    "ramp": {"f1", "f2", "f3", "axis", "key_data", "output_key", "trace_block"},
+                }.get(method, set())
+                # refine butterworth based on pass type
+                if method == "butterworth":
+                    if ptype == "lowpass":
+                        show = show | {"fmax"}
+                    elif ptype == "highpass":
+                        show = show | {"fmin"}
+                    else:
+                        show = show | {"fmin", "fmax"}
+                for name, widget in widgets.items():
+                    row = self.params_layout.labelForField(widget)
+                    visible = name in show
+                    widget.setVisible(visible)
+                    if row:
+                        row.setVisible(visible)
+
+            method_combo.currentTextChanged.connect(toggle_fields)
+            pass_combo.currentTextChanged.connect(toggle_fields)
+            toggle_fields()
+        else:
+            for p in params:
+                le = QtWidgets.QLineEdit()
+                if p.name in stored:
+                    le.setText(stored[p.name])
+                elif p.default is not inspect._empty:
+                    le.setText(str(p.default))
+                le.textChanged.connect(lambda text, name=p.name, b=box: self._save_param(b, name, text))
+                self.params_layout.addRow(f"{p.name}:", le)
 
     def _save_param(self, box, name: str, value: str):
         self._params_by_box.setdefault(box, {})[name] = value
@@ -379,7 +522,8 @@ class ProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
         self._plot_windows.clear()
-        for box, label in steps:
+
+        for idx, (box, label) in enumerate(steps):
             func = getattr(SignalProcessing, label, None)
             if not callable(func):
                 QtWidgets.QMessageBox.warning(self, "Processing", f"Function '{label}' not found.")
@@ -420,13 +564,25 @@ class ProcessingPanel(QtWidgets.QWidget):
             data = json.loads(manifest.read_text())
             zarr_path = data.get("zarr_store")
             geom_path = data.get("geometry_parquet")
+            selected_headers = data.get("selected_headers", {}) or {}
             import pandas as pd, zarr
 
+            context["_manifest_path"] = str(manifest)
             if geom_path:
                 context["geometry"] = pd.read_parquet(geom_path)
                 context["_geometry_path"] = geom_path
+                context["geometry_parquet"] = geom_path
             if zarr_path:
                 context["data"] = zarr.open(zarr_path, mode="r")["amplitude"][:]
+                context["zarr_store"] = zarr_path
+            if "dataset_type" in data:
+                context["dataset_type"] = data.get("dataset_type") or ""
+            if "chunk_trace" in data:
+                context["chunk_trace"] = data.get("chunk_trace")
+            # carry z_increment from metadata if present (ms)
+            z_inc = selected_headers.get("z_increment") or selected_headers.get("z_inc")
+            if z_inc is not None:
+                context["z_increment"] = z_inc
         except Exception:
             pass
         return context

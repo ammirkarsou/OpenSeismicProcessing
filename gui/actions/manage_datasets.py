@@ -80,16 +80,35 @@ class ManageDatasetsDialog(QtWidgets.QDialog):
         except Exception:
             zarr_path = None
             geom_path = None
+        # Only delete assets that are not referenced by other manifests
+        remaining_manifests = [m for m in self.manifests if m != manifest]
+        referenced = set()
+        for m in remaining_manifests:
+            try:
+                md = json.loads(m.read_text())
+                if "zarr_store" in md:
+                    referenced.add(Path(md["zarr_store"]).resolve())
+                if "geometry_parquet" in md:
+                    referenced.add(Path(md["geometry_parquet"]).resolve())
+            except Exception:
+                continue
+
         for p in [zarr_path, geom_path]:
-            if p and Path(p).exists():
-                target = Path(p)
-                try:
-                    if target.is_dir():
-                        shutil.rmtree(target, ignore_errors=True)
-                    else:
-                        target.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            if not p:
+                continue
+            target = Path(p)
+            if not target.exists():
+                continue
+            if target.resolve() in referenced:
+                # skip deletion if still referenced
+                continue
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    target.unlink(missing_ok=True)
+            except Exception:
+                pass
         try:
             manifest.unlink(missing_ok=True)
         except Exception:

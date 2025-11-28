@@ -78,9 +78,18 @@ def test_trim_samples():
 def test_zero_phase_wavelet_returns_real():
     wavelet = np.array([1.0, 0.5, 0.0, -0.5])
     context = {"data": wavelet}
+    # expected using same logic as zero_phase_wavelet
+    W_f = np.fft.fft(wavelet)
+    magnitude = np.abs(W_f)
+    zero_phase_W_f = magnitude
+    expected = np.fft.ifft(zero_phase_W_f)
+    expected = np.fft.ifftshift(expected)
+    expected = np.real(expected)
+
     out = processing.zero_phase_wavelet(context)
     assert out.shape == wavelet.shape
     assert np.isrealobj(out)
+    assert np.allclose(out, expected)
 
 
 def test_generate_local_coordinates():
