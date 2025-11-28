@@ -10,13 +10,12 @@
     <height>780</height>
    </rect>
   </property>
-  <property name="font">
-   <font>
-    <family>DejaVu Serif</family>
-    <pointsize>18</pointsize>
-    <bold>true</bold>
-   </font>
-  </property>
+ <property name="font">
+  <font>
+   <pointsize>12</pointsize>
+   <bold>false</bold>
+  </font>
+ </property>
   <property name="windowTitle">
    <string>Open Seismic Processing</string>
   </property>
@@ -35,37 +34,34 @@
     </rect>
    </property>
    <widget class="QMenu" name="menu_Survey">
-    <property name="font">
-     <font>
-      <family>DejaVu Serif</family>
-      <pointsize>14</pointsize>
-      <bold>true</bold>
-     </font>
-    </property>
+  <property name="font">
+   <font>
+    <pointsize>12</pointsize>
+    <bold>false</bold>
+   </font>
+  </property>
     <property name="title">
      <string>&amp;Survey</string>
     </property>
     <widget class="QMenu" name="menu_Import">
-     <property name="font">
-      <font>
-       <family>DejaVu Serif</family>
-       <pointsize>14</pointsize>
-       <bold>true</bold>
-      </font>
-     </property>
+    <property name="font">
+     <font>
+      <pointsize>12</pointsize>
+      <bold>false</bold>
+     </font>
+    </property>
      <property name="title">
       <string>&amp;Import...</string>
      </property>
      <addaction name="action_Seg_y_file"/>
     </widget>
     <widget class="QMenu" name="menu_Export">
-     <property name="font">
-      <font>
-       <family>DejaVu Serif</family>
-       <pointsize>14</pointsize>
-       <bold>true</bold>
-      </font>
-     </property>
+    <property name="font">
+     <font>
+      <pointsize>12</pointsize>
+      <bold>false</bold>
+     </font>
+    </property>
      <property name="title">
       <string>&amp;Export...</string>
      </property>
@@ -123,7 +119,7 @@
    </property>
    <property name="font">
     <font>
-     <pointsize>14</pointsize>
+     <pointsize>12</pointsize>
     </font>
    </property>
   </action>
@@ -133,7 +129,7 @@
    </property>
    <property name="font">
     <font>
-     <pointsize>14</pointsize>
+     <pointsize>12</pointsize>
     </font>
    </property>
   </action>
@@ -143,7 +139,7 @@
    </property>
    <property name="font">
     <font>
-     <pointsize>14</pointsize>
+     <pointsize>12</pointsize>
     </font>
    </property>
   </action>
@@ -153,7 +149,7 @@
    </property>
    <property name="font">
     <font>
-     <pointsize>14</pointsize>
+     <pointsize>12</pointsize>
     </font>
    </property>
   </action>
@@ -177,6 +173,7 @@
    <property name="font">
     <font>
      <pointsize>12</pointsize>
+     <bold>false</bold>
     </font>
    </property>
   </action>

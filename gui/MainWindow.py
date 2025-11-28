@@ -1,7 +1,7 @@
 import os
 
 from PyQt6 import QtWidgets, uic
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QFont
 
 from actions.basemap_view import show_basemap
 from actions.headers_view import show_headers
@@ -68,6 +68,18 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
             self.actionPreStackViewer.triggered.connect(self.ShowPreStackViewer)
         if self.actionProcessing:
             self.actionProcessing.triggered.connect(self.ShowProcessing)
+        self._harmonize_toolbar_fonts()
+
+    def _harmonize_toolbar_fonts(self):
+        # Use the window font (non-bold) as the reference to avoid mismatched weights.
+        base_font: QFont = QFont(self.font())
+        base_font.setBold(False)
+        for toolbar in self.findChildren(QtWidgets.QToolBar):
+            toolbar.setFont(base_font)
+            for action in toolbar.actions():
+                action.setFont(base_font)
+            for widget in toolbar.findChildren(QtWidgets.QWidget):
+                widget.setFont(base_font)
 
     def close_tab(self, index):
         widget = self.tabWidget.widget(index)
