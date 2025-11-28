@@ -5,6 +5,7 @@ import os
 import inspect
 import re
 import pylops
+from pathlib import Path
 
 try:
     import cupy as cp
@@ -190,31 +191,87 @@ def create_header(context, header_name, expression, key="geometry"):
     df = context.get(key)
 
     if df is None:
-        print("❌ Error: 'geometry' not found in context.")
-        return None
+        raise ValueError("'geometry' not found in context.")
 
     if not isinstance(df, pd.DataFrame):
-        print("❌ Error: 'geometry' in context is not a valid DataFrame.")
-        return None
+        raise ValueError("'geometry' in context is not a valid DataFrame.")
 
     # Extract variable names from the expression (basic regex for word-like tokens)
     tokens = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expression)
-    # Remove known functions like 'abs', 'sin', etc. — we keep only those not in numpy/pandas built-ins
-    builtins = {"abs", "log", "sqrt", "sin", "cos", "tan", "exp", "min", "max", "mean", "std", "sum"}
-    columns_used = [t for t in tokens if t not in builtins]
+    # Allowed helper names (will be injected into eval namespace)
+    allowed = {"abs", "log", "sqrt", "sin", "cos", "tan", "exp", "min", "max", "mean", "std", "sum", "np", "unique", "pd", "factorize", "True", "False", "return_inverse"}
+    columns_used = [t for t in tokens if t not in allowed]
 
     # Check if all used columns exist
     missing = [col for col in columns_used if col not in df.columns]
     if missing:
-        print(f"❌ Error: Column(s) not found in geometry: {missing}")
-        return None
+        raise ValueError(f"Column(s) not found in geometry: {missing}")
 
+    env = {c: df[c] for c in df.columns}
+    env.update(
+        {
+            "np": np,
+            "unique": np.unique,
+            "pd": pd,
+            "factorize": pd.factorize,
+            "True": True,
+            "False": False,
+            "None": None,
+        }
+    )
     try:
-        df[header_name] = df.eval(expression)
+        result = eval(expression, {"__builtins__": {}}, env)
+        if hasattr(result, "__len__") and len(result) == len(df):
+            df[header_name] = result
+        else:
+            df[header_name] = result
         return df
-    except Exception as e:
-        print(f"❌ Failed to create header '{header_name}': {e}")
-        return None
+    except Exception:
+        try:
+            df[header_name] = df.eval(
+                expression,
+                local_dict=env,
+                engine="python",
+            )
+            return df
+        except Exception as e:
+            raise ValueError(f"Failed to create header '{header_name}': {e}") from e
+
+
+def save_header(context, header_name: str | None = None, key: str = "geometry") -> Path:
+    """
+    Persist the current geometry DataFrame (including any new headers) back to its source Parquet/CSV.
+
+    Parameters
+    ----------
+    context : dict
+        Pipeline context containing the geometry DataFrame under ``key``.
+    header_name : str, optional
+        Optional header name to ensure it exists before saving.
+    key : str, optional
+        Context key for the geometry DataFrame (default "geometry").
+
+    Returns
+    -------
+    Path
+        The path written.
+    """
+    df = context.get(key)
+    if df is None or not isinstance(df, pd.DataFrame):
+        raise ValueError("'geometry' not found or invalid in context.")
+    if header_name and header_name not in df.columns:
+        raise ValueError(f"Header '{header_name}' not found in geometry.")
+    src_path = context.get("_geometry_path")
+    if not src_path:
+        raise ValueError("No geometry path available in context to save.")
+    out_path = Path(src_path)
+    try:
+        df.to_parquet(out_path)
+    except Exception:
+        # fall back to CSV if parquet fails
+        out_path = out_path.with_suffix(".csv")
+        df.to_csv(out_path, index=False)
+    return out_path
 def subset_geometry_by_condition(context, condition, key_input="data", key_output="data", key_geometry_input="geometry", key_geometry_output="geometry"):
     df = context.get(key_geometry_input)
     data = context.get(key_input)

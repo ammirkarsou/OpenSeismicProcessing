@@ -1,6 +1,6 @@
 import os
 from PyQt6 import QtWidgets
-from SurveyDialogs import DialogBox
+from dialog_box import DialogBox
 
 
 def setup_survey(window):

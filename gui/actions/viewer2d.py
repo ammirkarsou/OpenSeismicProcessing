@@ -87,7 +87,16 @@ class Viewer2D(QtWidgets.QWidget):
         self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.slider.setMinimum(0)
         self.slider.valueChanged.connect(self.update_section)
-        right_side.addWidget(self.slider)
+        self.slider_min_lbl = QtWidgets.QLabel("-")
+        self.slider_cur_lbl = QtWidgets.QLabel("-")
+        self.slider_max_lbl = QtWidgets.QLabel("-")
+        slider_row = QtWidgets.QHBoxLayout()
+        slider_row.addWidget(self.slider_min_lbl)
+        slider_row.addWidget(self.slider, 1)
+        slider_row.addWidget(self.slider_max_lbl)
+        slider_row.addWidget(QtWidgets.QLabel("Current:"))
+        slider_row.addWidget(self.slider_cur_lbl)
+        right_side.addLayout(slider_row)
 
         self.figure = Figure(figsize=(8, 6))
         self.canvas = FigureCanvas(self.figure)
@@ -158,6 +167,8 @@ class Viewer2D(QtWidgets.QWidget):
 
         self.inline_col = selected_headers.get("inline_header") or find_col(self.geom_df, ["iline", "inline"])
         self.xline_col = selected_headers.get("xline_header") or find_col(self.geom_df, ["xline", "crossline"])
+        self.z_start = float(selected_headers.get("z_start", 0.0) or 0.0)
+        self.z_inc = float(selected_headers.get("z_increment", 1.0) or 1.0)
         if self.inline_col is None or self.xline_col is None:
             QtWidgets.QMessageBox.warning(self, "2D Viewer", "Inline/Crossline headers not found.")
             return
@@ -173,6 +184,7 @@ class Viewer2D(QtWidgets.QWidget):
         else:
             values = np.unique(self.geom_df[self.xline_col].to_numpy())
         self.section_values = values
+        self._update_slider_labels()
         if len(values) == 0:
             self.slider.setMaximum(0)
         else:
@@ -210,8 +222,12 @@ class Viewer2D(QtWidgets.QWidget):
         self.figure.clear()
         ax = self.figure.add_subplot(111)
         im = ax.imshow(img, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax, origin="upper")
+        y_spacing = getattr(self, "z_inc", 1.0)
+        y_start = getattr(self, "z_start", 0.0)
+        y_end = y_start + (img.shape[0] - 1) * y_spacing
+        ax.images[0].set_extent([subset[order_col].iloc[0], subset[order_col].iloc[-1], y_end, y_start])
         ax.set_xlabel(order_col)
-        ax.set_ylabel("Time/depth")
+        ax.set_ylabel("Z")
         try:
             target_disp = int(round(float(target)))
         except Exception:
@@ -221,6 +237,7 @@ class Viewer2D(QtWidgets.QWidget):
         self.canvas.draw_idle()
         self._current_subset_df = subset
         self._plot_map(subset)
+        self._update_slider_labels(current=target)
 
     def apply_global_limits(self):
         self.compute_global_limits(force=True)
@@ -295,6 +312,29 @@ class Viewer2D(QtWidgets.QWidget):
             ax.legend(loc="upper right", bbox_to_anchor=(1.15, 1.0))
         ax.grid(True, linestyle="--", alpha=0.3)
         self.map_canvas.draw_idle()
+
+    def _update_slider_labels(self, current=None):
+        if getattr(self, "section_values", None) is None or len(self.section_values) == 0:
+            self.slider_min_lbl.setText("-")
+            self.slider_max_lbl.setText("-")
+            self.slider_cur_lbl.setText("-")
+            return
+        fmt = lambda v: str(int(round(float(v)))) if self._is_number(v) else str(v)
+        self.slider_min_lbl.setText(fmt(self.section_values[0]))
+        self.slider_max_lbl.setText(fmt(self.section_values[-1]))
+        if current is None:
+            idx = self.slider.value()
+            if 0 <= idx < len(self.section_values):
+                current = self.section_values[idx]
+        if current is not None:
+            self.slider_cur_lbl.setText(fmt(current))
+
+    def _is_number(self, v):
+        try:
+            float(v)
+            return True
+        except Exception:
+            return False
 
 
 def _list_manifests(survey_path: str | Path) -> list[Path]:

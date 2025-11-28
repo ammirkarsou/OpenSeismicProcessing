@@ -23,7 +23,7 @@ try:
 except Exception:
     pa = None
     pq = None
-from openseismicprocessing.catalog import ensure_project, delete_project, list_projects
+from openseismicprocessing.catalog import ensure_project, delete_project, list_projects, rename_project
 from openseismicprocessing.constants import TRACE_HEADER_REV0, TRACE_HEADER_REV1
 from openseismicprocessing.segy_inspector import SegyInspector, print_revision_summary
 from openseismicprocessing.io import read_trace_headers_until, get_text_header
@@ -1074,7 +1074,18 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return True
 
     def _selected_headers_metadata(self) -> dict:
-        return {
+        def scaled_range(column_attr: str, scale_attr: str):
+            col = getattr(self, column_attr, None)
+            scale = getattr(self, scale_attr, None)
+            if col and hasattr(self, "SEGY_Dataframe") and isinstance(self.SEGY_Dataframe, pd.DataFrame):
+                try:
+                    scaled = self._apply_coordinate_scale(self.SEGY_Dataframe[col], scale)
+                    return [float(np.nanmin(scaled)), float(np.nanmax(scaled))]
+                except Exception:
+                    return None
+            return None
+
+        meta = {
             "inline_header": getattr(self, "selected_inline_column", None),
             "xline_header": getattr(self, "selected_xline_column", None),
             "x_header": getattr(self, "selected_xrange_column", None),
@@ -1084,6 +1095,37 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             "x_scaler_header": self.xScaleCombo.currentText() if hasattr(self, "xScaleCombo") else None,
             "y_scaler_header": self.yScaleCombo.currentText() if hasattr(self, "yScaleCombo") else None,
         }
+        xr = scaled_range("selected_xrange_column", "xScale")
+        yr = scaled_range("selected_yrange_column", "yScale")
+        ir = scaled_range("selected_inline_column", "ilineScale") if hasattr(self, "ilineScale") else None
+        xrng = scaled_range("selected_xline_column", "xlineScale") if hasattr(self, "xlineScale") else None
+        if xr:
+            meta["x_range"] = xr
+        if yr:
+            meta["y_range"] = yr
+        if ir:
+            meta["inline_range"] = ir
+        if xrng:
+            meta["xline_range"] = xrng
+        z_start = getattr(self, "init", 0.0)
+        z_inc = getattr(self, "dt", 1.0)
+        meta["z_start"] = float(z_start)
+        meta["z_increment"] = float(z_inc)
+        if hasattr(self, "n_samples") and self.n_samples:
+            meta["z_end"] = float(z_start + (self.n_samples - 1) * z_inc)
+
+        mode = self.GetAcquisitionType() if hasattr(self, "GetAcquisitionType") else ""
+        is_pre = "Pre-stack" in mode
+        is_post = "Post-stack" in mode
+        meta["source_x_header"] = getattr(self, "selected_inline_column", None) if is_pre else None
+        meta["source_y_header"] = getattr(self, "selected_xline_column", None) if is_pre else None
+        meta["group_x_header"] = getattr(self, "selected_xrange_column", None) if is_pre else None
+        meta["group_y_header"] = getattr(self, "selected_yrange_column", None) if is_pre else None
+        meta["post_inline_header"] = getattr(self, "selected_inline_column", None) if is_post else None
+        meta["post_xline_header"] = getattr(self, "selected_xline_column", None) if is_post else None
+        meta["post_x_header"] = getattr(self, "selected_xrange_column", None) if is_post else None
+        meta["post_y_header"] = getattr(self, "selected_yrange_column", None) if is_post else None
+        return meta
 
     def GetAcquisitionType(self):
         return self.comboBoxMode.currentText()
@@ -1766,8 +1808,10 @@ class DialogBox(QtWidgets.QDialog):
 
         self.newSurveyButton = QtWidgets.QPushButton("New")
         self.deleteSurveyButton = QtWidgets.QPushButton("Delete")
+        self.renameSurveyButton = QtWidgets.QPushButton("Rename")
         button_row = QtWidgets.QHBoxLayout()
         button_row.addWidget(self.newSurveyButton)
+        button_row.addWidget(self.renameSurveyButton)
         button_row.addWidget(self.deleteSurveyButton)
         button_row.addStretch()
 
@@ -1800,6 +1844,7 @@ class DialogBox(QtWidgets.QDialog):
 
         self.newSurveyButton.clicked.connect(self.CreateNewSurvey)
         self.deleteSurveyButton.clicked.connect(self.DeleteSurvey)
+        self.renameSurveyButton.clicked.connect(self.RenameSurvey)
         self.surveyListView.selectionModel().currentChanged.connect(self._on_survey_selected)
         self.UpdateSurveyList(select_name=self.initial_selection)
 
@@ -1831,7 +1876,86 @@ class DialogBox(QtWidgets.QDialog):
                 delete_project(name=selected_survey)
 
                 self.UpdateSurveyList()
-    
+
+    def RenameSurvey(self):
+        selected_survey = self.GetSelectedSurvey()
+        if not selected_survey:
+            QtWidgets.QMessageBox.information(self, "Rename Survey", "Please select a survey first.")
+            return
+        new_name, ok = QtWidgets.QInputDialog.getText(self, "Rename Survey", "New survey name:", text=selected_survey)
+        if not ok or not new_name or new_name == selected_survey:
+            return
+        old_path = os.path.join(self.main.rootFolderPath, selected_survey)
+        new_path = os.path.join(self.main.rootFolderPath, new_name)
+        if os.path.exists(new_path):
+            QtWidgets.QMessageBox.warning(self, "Rename Survey", "A survey with that name already exists.")
+            return
+        try:
+            os.rename(old_path, new_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Rename Survey", f"Failed to rename folder:\n{exc}")
+            return
+        try:
+            rename_project(selected_survey, new_name, Path(new_path))
+        except Exception as exc:
+            # attempt to revert folder rename to avoid inconsistency
+            try:
+                os.rename(new_path, old_path)
+            except Exception:
+                pass
+            QtWidgets.QMessageBox.warning(self, "Rename Survey", f"Failed to update catalog:\n{exc}")
+            return
+        # Update state
+        if selected_survey in self.main.folder_list:
+            self.main.folder_list.remove(selected_survey)
+        if new_name not in self.main.folder_list:
+            self.main.folder_list.append(new_name)
+        self.main.folder_list = sorted(self.main.folder_list, key=str.lower)
+        if self.main.currentSurveyName == selected_survey:
+            self.main.currentSurveyName = new_name
+            self.main.currentSurveyPath = new_path
+        self._update_manifest_paths(old_path, new_path)
+        self.UpdateSurveyList(select_name=new_name)
+
+    def _update_manifest_paths(self, old_root: str, new_root: str):
+        """Re-point manifest absolute paths after a survey rename."""
+        try:
+            old_root_path = Path(old_root).resolve()
+            new_root_path = Path(new_root).resolve()
+            bin_dir = new_root_path / "Binaries"
+            if not bin_dir.exists():
+                return
+            for manifest_path in bin_dir.glob("*.manifest.json"):
+                try:
+                    data = json.loads(manifest_path.read_text())
+                except Exception:
+                    continue
+                updated = False
+                for key in ("geometry_parquet", "zarr_store"):
+                    val = data.get(key)
+                    if not val or not isinstance(val, str):
+                        continue
+                    try:
+                        p = Path(val).resolve()
+                        rel = p.relative_to(old_root_path)
+                        new_val = str(new_root_path / rel)
+                    except Exception:
+                        # Fallback: string replace
+                        if old_root in val:
+                            new_val = val.replace(old_root, str(new_root_path))
+                        else:
+                            continue
+                    if new_val != val:
+                        data[key] = new_val
+                        updated = True
+                if updated:
+                    try:
+                        manifest_path.write_text(json.dumps(data, indent=2))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def CreateNewFolders(self):
         #create main folder
         os.mkdir(self.surveyPath)

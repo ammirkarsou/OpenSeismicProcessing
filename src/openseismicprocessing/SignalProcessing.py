@@ -17,6 +17,7 @@ from .processing import (
     trim_samples,
     sort,
     create_header,
+    save_header,
     zero_phase_wavelet,
     calculate_convolution_operator,
     apply_designature,
@@ -60,7 +61,7 @@ __all__ = [
 
     # Processing
     "resample", "stack_data_along_axis", "mute_data", "trim_samples", "sort",
-    "create_header", "zero_phase_wavelet", "calculate_convolution_operator", "apply_designature",
+    "create_header", "save_header", "zero_phase_wavelet", "calculate_convolution_operator", "apply_designature",
     "subset_geometry_by_condition", "scale_coordinate_units", "generate_local_coordinates",
     "kill_traces_outside_box",
 

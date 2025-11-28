@@ -12,6 +12,7 @@ from actions.setup_survey import setup_survey
 from actions.viewer2d import show_2d_viewer
 from actions.viewer_prestack import show_prestack_viewer
 from actions.viewer3d import show_3d_viewer
+from actions.processing_view import show_processing
 from openseismicprocessing.catalog import get_workspace_root, init_db
 
 
@@ -35,6 +36,12 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
         self.actionManage = self.findChild(QAction, "action_Manage")
         self.action2DViewer = self.findChild(QAction, "action_2D_Viewer")
         self.actionPreStackViewer = self.findChild(QAction, "action_Pre_stack_Viewer")
+        self.menuProcessing = self.findChild(QtWidgets.QMenu, "menu_Processing")
+        self.actionProcessing = self.findChild(QAction, "action_Processing")
+        if self.actionProcessing is None and self.menuProcessing:
+            self.actionProcessing = QAction("Processing", self)
+            self.actionProcessing.setObjectName("action_Processing")
+            self.menuProcessing.addAction(self.actionProcessing)
 
         self.tabWidget = QtWidgets.QTabWidget()
         self.tabWidget.setTabsClosable(True)
@@ -59,6 +66,8 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
             self.action2DViewer.triggered.connect(self.Show2DViewer)
         if self.actionPreStackViewer:
             self.actionPreStackViewer.triggered.connect(self.ShowPreStackViewer)
+        if self.actionProcessing:
+            self.actionProcessing.triggered.connect(self.ShowProcessing)
 
     def close_tab(self, index):
         widget = self.tabWidget.widget(index)
@@ -92,3 +101,6 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
 
     def ShowPreStackViewer(self):
         show_prestack_viewer(self)
+
+    def ShowProcessing(self):
+        show_processing(self)

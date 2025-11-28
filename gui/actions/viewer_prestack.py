@@ -90,12 +90,28 @@ class PrestackViewer(QtWidgets.QWidget):
         self.perc_spin.setValue(99.0)
         top_row.addWidget(self.perc_spin)
 
+        self.spectrum_chk = QtWidgets.QCheckBox("Spectrum")
+        self.spectrum_chk.setChecked(False)
+        top_row.addWidget(self.spectrum_chk)
+        self.autocorr_chk = QtWidgets.QCheckBox("Autocorrelation")
+        self.autocorr_chk.setChecked(False)
+        top_row.addWidget(self.autocorr_chk)
+
         right.addLayout(top_row)
 
         self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.slider.setMinimum(0)
         self.slider.valueChanged.connect(self.on_slider_changed)
-        right.addWidget(self.slider)
+        self.slider_min_lbl = QtWidgets.QLabel("-")
+        self.slider_cur_lbl = QtWidgets.QLabel("-")
+        self.slider_max_lbl = QtWidgets.QLabel("-")
+        slider_row = QtWidgets.QHBoxLayout()
+        slider_row.addWidget(self.slider_min_lbl)
+        slider_row.addWidget(self.slider, 1)
+        slider_row.addWidget(self.slider_max_lbl)
+        slider_row.addWidget(QtWidgets.QLabel("Current:"))
+        slider_row.addWidget(self.slider_cur_lbl)
+        right.addLayout(slider_row)
 
         self.placeholder = QtWidgets.QLabel("Select a dataset to configure headers.")
         self.placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -103,12 +119,26 @@ class PrestackViewer(QtWidgets.QWidget):
 
         self.figure = Figure(figsize=(8, 6))
         self.canvas = FigureCanvas(self.figure)
-        right.addWidget(self.canvas, 1)
+
+        self.spectrum_fig = Figure(figsize=(6, 3))
+        self.spectrum_canvas = FigureCanvas(self.spectrum_fig)
+        self.spectrum_canvas.setVisible(False)
+
+        plots_row = QtWidgets.QHBoxLayout()
+        plots_row.addWidget(self.canvas, 2)
+        plots_row.addWidget(self.spectrum_canvas, 1)
+        self.autocorr_fig = Figure(figsize=(6, 3))
+        self.autocorr_canvas = FigureCanvas(self.autocorr_fig)
+        self.autocorr_canvas.setVisible(False)
+        plots_row.addWidget(self.autocorr_canvas, 1)
+        right.addLayout(plots_row)
 
         layout.addLayout(right, 3)
 
         self.apply_btn.clicked.connect(self.apply_selection)
         self.perc_spin.valueChanged.connect(self.on_limits_changed)
+        self.spectrum_chk.stateChanged.connect(self.on_spectrum_toggle)
+        self.autocorr_chk.stateChanged.connect(self.on_autocorr_toggle)
 
     def on_item_changed(self, item: QtWidgets.QListWidgetItem):
         if item.checkState() == QtCore.Qt.CheckState.Checked:
@@ -188,6 +218,7 @@ class PrestackViewer(QtWidgets.QWidget):
         zarr_path = meta.get("zarr_store")
         header1 = self.header1_combo.currentText()
         header2 = self.header2_combo.currentText()
+        selected_headers = meta.get("selected_headers", {}) or {}
         if not geom_path or not zarr_path:
             QtWidgets.QMessageBox.warning(self, "Pre-stack Viewer", "Manifest is missing required paths.")
             return
@@ -197,6 +228,12 @@ class PrestackViewer(QtWidgets.QWidget):
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Pre-stack Viewer", f"Failed to load data:\n{exc}")
             return
+        self.z_start = float(selected_headers.get("z_start", 0.0) or 0.0)
+        self.z_inc = float(selected_headers.get("z_increment", 1.0) or 1.0)
+        self.source_x_header = selected_headers.get("source_x_header")
+        self.source_y_header = selected_headers.get("source_y_header")
+        self.group_x_header = selected_headers.get("group_x_header")
+        self.group_y_header = selected_headers.get("group_y_header")
         try:
             context = {"geometry": self.geom_df.copy(), "data": self.amp[:]}
             processing.sort(context, header1, header2)
@@ -208,6 +245,7 @@ class PrestackViewer(QtWidgets.QWidget):
             self.slider.setMaximum(max_idx)
             self.slider.setValue(0)
             self.slider.blockSignals(False)
+            self._update_slider_labels()
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Pre-stack Viewer", f"Failed to sort data:\n{exc}")
             return
@@ -230,6 +268,7 @@ class PrestackViewer(QtWidgets.QWidget):
         header1 = self.header1_combo.currentText()
         header2 = self.header2_combo.currentText()
         target = self._header1_values[idx]
+        self._update_slider_labels(current=target)
         mask = self.geom_df[header1] == target
         subset = self.geom_df[mask]
         trace_indices = subset.index.to_numpy()
@@ -247,6 +286,8 @@ class PrestackViewer(QtWidgets.QWidget):
             self._current_header2 = header2
             self._current_target = target
             self._plot_map(subset)
+            self._update_spectrum_plot()
+            self._update_autocorr_plot()
         except Exception:
             self.placeholder.setText(
                 f"Selected {header1}={target} with {len(trace_indices)} traces (plot failed)."
@@ -267,25 +308,30 @@ class PrestackViewer(QtWidgets.QWidget):
             clip = float(np.nanpercentile(data, perc))
             vmin = -clip
             vmax = clip
-        plot_seismic_image(
-            context,
-            xlabel=header2,
-            ylabel="Time/depth",
-            y_spacing=1.0,
-            x_header=header2,
-            perc=None,
+        y_spacing = getattr(self, "z_inc", 1.0)
+        y_start = getattr(self, "z_start", 0.0)
+        y_end = y_start + (data.shape[0] - 1) * y_spacing
+        extent = [geom_df[header2].iloc[0], geom_df[header2].iloc[-1], y_end, y_start]
+        im = ax.imshow(
+            data,
+            aspect="auto",
             cmap="gray_r",
             vmin=vmin,
             vmax=vmax,
-            ax=ax,
-            show=False,
+            extent=extent,
+            origin="upper",
+            interpolation="none",
         )
+        ax.set_xlabel(header2)
+        ax.set_ylabel("Time (ms)")
+        ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Amplitude")
         ax.set_title(f"{header1} = {target}")
         self.canvas.draw_idle()
 
     def _clear_map(self):
         self.map_fig.clear()
         self.map_canvas.draw_idle()
+        self._update_slider_labels(clear=True)
 
     def _find_col(self, df: pd.DataFrame, names: list[str]) -> str | None:
         for n in names:
@@ -340,6 +386,120 @@ class PrestackViewer(QtWidgets.QWidget):
             ax.legend(loc="upper right", bbox_to_anchor=(1.15, 1.0))
         ax.grid(True, linestyle="--", alpha=0.3)
         self.map_canvas.draw_idle()
+
+    def _clear_spectrum(self):
+        self.spectrum_fig.clear()
+        self.spectrum_canvas.draw_idle()
+        self.spectrum_canvas.setVisible(False)
+
+    def _clear_autocorr(self):
+        self.autocorr_fig.clear()
+        self.autocorr_canvas.draw_idle()
+        self.autocorr_canvas.setVisible(False)
+
+    def on_spectrum_toggle(self):
+        self._update_spectrum_plot()
+
+    def on_autocorr_toggle(self):
+        self._update_autocorr_plot()
+
+    def _plot_spectrum(self, data: np.ndarray):
+        self.spectrum_fig.clear()
+        ax = self.spectrum_fig.add_subplot(111)
+        dt_sec = (getattr(self, "z_inc", 1.0) or 1.0) / 1000.0
+        try:
+            n_samples = data.shape[0]
+            spectrum = np.fft.rfft(data, axis=0)
+            magnitude = np.sum(np.abs(spectrum), axis=1)
+            freqs = np.fft.rfftfreq(n_samples, d=dt_sec)
+            ax.plot(freqs, magnitude, label="Amplitude spectrum")
+            ax.set_xlabel("Frequency (Hz)")
+            ax.set_ylabel("Magnitude")
+            ax.grid(True, linestyle="--", alpha=0.3)
+            ax.legend()
+        except Exception as exc:
+            ax.text(0.5, 0.5, f"Failed to compute spectrum:\n{exc}", ha="center", va="center")
+        self.spectrum_canvas.draw_idle()
+
+    def _plot_autocorr(self, data: np.ndarray):
+        self.autocorr_fig.clear()
+        ax = self.autocorr_fig.add_subplot(111)
+        dt_sec = (getattr(self, "z_inc", 1.0) or 1.0) / 1000.0
+        try:
+            # Autocorrelation per trace along Z
+            n_samples, n_traces = data.shape
+            corrs = np.empty((2 * n_samples - 1, n_traces))
+            for i in range(n_traces):
+                trace = data[:, i]
+                corr = np.correlate(trace, trace, mode="full")
+                corrs[:, i] = corr
+            lags = np.arange(-(n_samples - 1), n_samples) * dt_sec
+            extent = [0, n_traces - 1, lags[-1], lags[0]]
+            perc = self.perc_spin.value()
+            vmin = vmax = None
+            if perc > 0:
+                clip = float(np.nanpercentile(corrs, perc))
+                vmin = -clip
+                vmax = clip
+            im = ax.imshow(
+                corrs,
+                aspect="auto",
+                cmap="gray_r",
+                vmin=vmin,
+                vmax=vmax,
+                extent=extent,
+                origin="upper",
+                interpolation="none",
+            )
+            ax.set_xlabel("Trace")
+            ax.set_ylabel("Lag (ms)")
+            ax.set_title("Autocorrelation")
+            self.autocorr_fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Amplitude")
+        except Exception as exc:
+            ax.text(0.5, 0.5, f"Failed to compute autocorrelation:\n{exc}", ha="center", va="center")
+        self.autocorr_canvas.draw_idle()
+
+    def _update_autocorr_plot(self):
+        if not self.autocorr_chk.isChecked():
+            self._clear_autocorr()
+            return
+        if self._current_subset_data is None:
+            self._clear_autocorr()
+            return
+        self.autocorr_canvas.setVisible(True)
+        self._plot_autocorr(self._current_subset_data)
+
+    def _format_val(self, val):
+        try:
+            ival = int(round(float(val)))
+            return str(ival)
+        except Exception:
+            return str(val)
+
+    def _update_slider_labels(self, current=None, clear: bool = False):
+        if clear or getattr(self, "_header1_values", None) is None or len(self._header1_values) == 0:
+            self.slider_min_lbl.setText("-")
+            self.slider_max_lbl.setText("-")
+            self.slider_cur_lbl.setText("-")
+            return
+        self.slider_min_lbl.setText(self._format_val(self._header1_values[0]))
+        self.slider_max_lbl.setText(self._format_val(self._header1_values[-1]))
+        if current is None:
+            idx = self.slider.value()
+            if 0 <= idx < len(self._header1_values):
+                current = self._header1_values[idx]
+        if current is not None:
+            self.slider_cur_lbl.setText(self._format_val(current))
+
+    def _update_spectrum_plot(self):
+        if not self.spectrum_chk.isChecked():
+            self._clear_spectrum()
+            return
+        if self._current_subset_data is None:
+            self._clear_spectrum()
+            return
+        self.spectrum_canvas.setVisible(True)
+        self._plot_spectrum(self._current_subset_data)
 
     def apply_global_limits(self):
         # Deprecated placeholder; kept for compatibility if invoked elsewhere.
