@@ -7,6 +7,7 @@ pylops
 numba
 segyio
 ipython
+platformdirs
 PyQt6
 pyarrow
 fastparquet

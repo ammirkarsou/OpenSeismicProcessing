@@ -28,6 +28,7 @@ setup(
         "numpy",
         "pandas",
         "matplotlib",
+        "platformdirs",
         "scipy",
         "opencv-python",
         "pylops",

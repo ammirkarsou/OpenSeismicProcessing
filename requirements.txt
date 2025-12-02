@@ -10,6 +10,7 @@ ipython
 zarr<3
 numcodecs
 tqdm
+platformdirs
 cupy>=12.0
 PyQt6
 pyarrow

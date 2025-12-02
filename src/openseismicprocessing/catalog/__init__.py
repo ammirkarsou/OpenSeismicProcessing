@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, List
 
+import platformdirs
+
 __all__ = [
     "DB_PATH",
     "init_db",
@@ -41,23 +43,40 @@ __all__ = [
     "reset_project",
 ]
 
-# User-level config + database locations. The DB defaults to the selected
-# workspace root (``<workspace>/catalog/golem_catalog.db``) and falls back to
-# ``~/.openseismicprocessing/catalog/golem_catalog.db`` when no workspace is set.
-_CONFIG_DIR = Path.home() / ".openseismicprocessing"
+# Cross-platform user-level config + database locations (platformdirs).
+_APP_NAME = "OpenSeismicProcessing"
+_CONFIG_DIR = Path(platformdirs.user_config_dir(_APP_NAME))
 _CONFIG_PATH = _CONFIG_DIR / "config.json"
+_DATA_DIR = Path(platformdirs.user_data_dir(_APP_NAME))
 _DB_SUBDIR = "catalog"
 _DB_NAME = "golem_catalog.db"
-_LEGACY_DB_PATH = Path(__file__).resolve().parents[3] / _DB_SUBDIR / _DB_NAME
+_DB_PATH = _DATA_DIR / _DB_SUBDIR / _DB_NAME
+# Legacy locations from previous releases.
+_LEGACY_CONFIG_DIR = Path.home() / ".openseismicprocessing"
+_LEGACY_CONFIG_PATH = _LEGACY_CONFIG_DIR / "config.json"
+_LEGACY_DB_PATHS = [
+    _LEGACY_CONFIG_DIR / _DB_SUBDIR / _DB_NAME,  # ~/.openseismicprocessing/catalog/golem_catalog.db
+    Path(__file__).resolve().parents[3] / _DB_SUBDIR / _DB_NAME,  # repo-root/catalog/golem_catalog.db
+]
 
 
 def _load_config() -> dict[str, Any]:
-    if not _CONFIG_PATH.exists():
-        return {}
+    if _CONFIG_PATH.exists():
+        try:
+            return json.loads(_CONFIG_PATH.read_text())
+        except Exception:
+            return {}
+    # Fallback to legacy config path if present.
+    if _LEGACY_CONFIG_PATH.exists():
+        try:
+            return json.loads(_LEGACY_CONFIG_PATH.read_text())
+        except Exception:
+            return {}
     try:
-        return json.loads(_CONFIG_PATH.read_text())
+        _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:
-        return {}
+        pass
+    return {}
 
 
 def _save_config(config: dict[str, Any]) -> None:
@@ -66,20 +85,34 @@ def _save_config(config: dict[str, Any]) -> None:
 
 
 def _compute_db_path(workspace_root: Optional[str]) -> Path:
-    base_dir = Path(workspace_root).expanduser() if workspace_root else _CONFIG_DIR
-    return base_dir / _DB_SUBDIR / _DB_NAME
+    # Workspace root is stored for the UI, but DB always lives in user data dir.
+    return _DB_PATH
 
 
 def _maybe_migrate_legacy_db(target: Path) -> None:
     """Copy an existing legacy DB (repo-root) into the new location if missing."""
     if target.exists():
         return
+    candidates: list[Path] = []
+    # Legacy workspace-root location (if old config stored it).
     try:
-        if _LEGACY_DB_PATH.exists() and _LEGACY_DB_PATH.resolve() != target.resolve():
-            shutil.copy2(_LEGACY_DB_PATH, target)
-    except OSError:
-        # If migration fails, we'll create a fresh DB on next init.
+        legacy_cfg = {}
+        if _LEGACY_CONFIG_PATH.exists():
+            legacy_cfg = json.loads(_LEGACY_CONFIG_PATH.read_text())
+        root = legacy_cfg.get("workspace_root")
+        if root:
+            candidates.append(Path(root).expanduser() / _DB_SUBDIR / _DB_NAME)
+    except Exception:
         pass
+    candidates.extend(_LEGACY_DB_PATHS)
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.resolve() != target.resolve():
+                shutil.copy2(candidate, target)
+                return
+        except OSError:
+            # If migration fails, we'll create a fresh DB on next init.
+            pass
 
 
 def _read_workspace_root_from_config() -> Optional[str]:
