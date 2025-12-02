@@ -18,7 +18,12 @@ def load_segy_files(window):
         except StopIteration:
             boundary = None
 
-    dialog = ImportSEGYDialog(boundary=boundary, survey_root=window.currentSurveyPath)
+    is_new_survey = not bool(getattr(window, "currentSurveyName", None))
+    dialog = ImportSEGYDialog(
+        boundary=boundary,
+        survey_root=window.currentSurveyPath,
+        is_new_survey=is_new_survey,
+    )
     result = dialog.exec()
     try:
         if result == QtWidgets.QDialog.DialogCode.Accepted:

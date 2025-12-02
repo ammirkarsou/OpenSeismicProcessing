@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Launcher for the Open Seismic Processing GUI."""
 
-from PyQt6.QtWidgets import QApplication
+import os
 import sys
+
+# Avoid DBus theme warnings in sandboxed/portal-less environments.
+os.environ.setdefault("QT_QPA_PLATFORMTHEME", "")
+
+from PyQt6.QtWidgets import QApplication
 
 from MainWindow import OpenSeismicProcessingWindow
 

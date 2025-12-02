@@ -5,7 +5,7 @@ Created on Sun Feb  9 18:34:03 2025
 
 @author: ammir
 """
-from PyQt6 import QtWidgets, uic
+from PyQt6 import QtWidgets, uic, QtCore
 from PyQt6.QtCore import QStringListModel, Qt
 import os
 import shutil
@@ -33,90 +33,16 @@ import segyio
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-class TwoDimensionPostStackSEGYDialog(QtWidgets.QDialog):
-    """Custom QDialog class for creating a new survey."""
-    def __init__(self, parentClass):
-        super().__init__()
-        uic.loadUi("2DPostStackDialog.ui", self)  # Load the UI
-
-        self.dsbNx = self.findChild(QtWidgets.QDoubleSpinBox, "doubleSpinBox")
-        self.dsbNz = self.findChild(QtWidgets.QDoubleSpinBox, "doubleSpinBox_2")
-        self.dsbDx = self.findChild(QtWidgets.QDoubleSpinBox, "doubleSpinBox_3")
-        self.dsbDz = self.findChild(QtWidgets.QDoubleSpinBox, "doubleSpinBox_4")
-
-
-        self.dsbNx.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.dsbNz.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.dsbDx.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.dsbDz.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-
-        self.n_traces = parentClass.n_traces
-        self.n_samples = parentClass.n_samples
-
-        x=parentClass.SEGY_Dataframe[parentClass.selected_xrange_column].to_numpy()/parentClass.xScale - parentClass.xTranslation
-        y=parentClass.SEGY_Dataframe[parentClass.selected_yrange_column].to_numpy()/parentClass.yScale - parentClass.yTranslation
-
-        self.Nx = parentClass.n_traces
-        self.Nz = parentClass.n_samples
-        self.dx = np.sqrt((x[1]-x[0])**2 + (y[1]-y[1])**2)
-        self.dz = parentClass.dt
-
-        
-        self.dsbNx.setValue(parentClass.n_traces)
-        self.dsbNz.setValue(parentClass.n_samples)
-        self.dsbDx.setValue(self.dx)
-        self.dsbDz.setValue(parentClass.dt)
-
-        self.dsbNx.valueChanged.connect(self.UpdateNx)
-        self.dsbNz.valueChanged.connect(self.UpdateNz)
-        self.dsbDx.valueChanged.connect(self.UpdateDx)
-        self.dsbDz.valueChanged.connect(self.UpdateDz)
-
-        
-
-    def UpdateDx(self, value):
-        self.dx = value
-
-    def UpdateDz(self, value):
-        self.dz = value
-
-    def UpdateNx(self, value):
-        self.Nx = value
-
-    def UpdateNz(self, value):
-        self.Nz = value
-
-    # ✅ Getter method to retrieve dx and dz after the dialog closes
-    def PassChildClassValues(self, parentClass):
-        parentClass.dx = self.dx
-        parentClass.dz = self.dz
-
-    # ✅ Override accept() to validate input before closing
-    def accept(self):
-        # Calculate expected traces
-        expected_traces = self.Nz * self.Nx
-
-        # Validate against the parent's n_traces
-        if expected_traces != self.n_traces * self.n_samples:
-            # Show warning and prevent dialog closure
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Validation Error",
-                f"Invalid dimensions: Nz * Nx = {expected_traces}, expected {self.n_traces * self.n_samples}.\nPlease correct the values."
-            )
-            return  # Don't call super().accept() to keep the dialog open
-
-        # If validation passes, pass the values and accept the dialog
-        super().accept()
-
 class ImportSEGYDialog(QtWidgets.QDialog):
-    """Custom QDialog class for creating a new survey."""
-    def __init__(self, boundary=None, survey_root: str | None = None):
+    """Custom QDialog class for creating a new survey or adding data to an existing survey."""
+    def __init__(self, boundary=None, survey_root: str | None = None, is_new_survey: bool = False):
+        """Build the SEG-Y import dialog, optionally seeded with boundary and root info."""
         super().__init__()
         self.setWindowTitle("Load SEG-Y")
         self.resize(620, 800)
         self.survey_boundary = boundary or {}
         self.survey_root = Path(survey_root) if survey_root else None
+        self.is_new_survey = is_new_survey
 
         main_layout = QtWidgets.QVBoxLayout(self)
 
@@ -186,12 +112,15 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         self.spinbox2.setValue(1.0)
         self.spinbox2.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.spinbox2.setMaximumWidth(90)
+        self.comboBoxZUnits = QtWidgets.QComboBox()
+        self.comboBoxZUnits.addItems(["meters", "milliseconds", "feet"])
         self.comboBoxHeaderUser = QtWidgets.QComboBox()
         form_layout.addWidget(label_z, 0, 0)
         form_layout.addWidget(self.lineEdit2, 0, 1)
         form_layout.addWidget(self.spinbox1, 0, 2)
         form_layout.addWidget(self.spinbox2, 0, 3)
-        form_layout.addWidget(self.comboBoxHeaderUser, 0, 4)
+        form_layout.addWidget(self.comboBoxZUnits, 0, 4)
+        form_layout.addWidget(self.comboBoxHeaderUser, 0, 5)
         rev_layout = QtWidgets.QHBoxLayout()
         rev_layout.addWidget(QtWidgets.QLabel("SEGY Revision"))
         self.comboBoxHeaderUser_revision = QtWidgets.QComboBox()
@@ -201,13 +130,19 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         self.numTracesToShow = QtWidgets.QDoubleSpinBox()
         self.numTracesToShow.setDecimals(0)
         self.numTracesToShow.setRange(1, 1e9)
-        self.numTracesToShow.setValue(200)  # lower default for faster initial loads
+        self.numTracesToShow.setValue(1000)
         self.numTracesToShow.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
         rev_layout.addWidget(self.numTracesToShow)
-        rev_layout.addWidget(QtWidgets.QLabel("Units"))
-        self.comboBoxUnits = QtWidgets.QComboBox()
-        self.comboBoxUnits.addItems(["meters", "feet"])
-        rev_layout.addWidget(self.comboBoxUnits)
+        rev_layout.addWidget(QtWidgets.QLabel("X/Y Units"))
+        self.comboBoxXYUnits = QtWidgets.QComboBox()
+        self.comboBoxXYUnits.addItems(["meters", "feet"])
+        rev_layout.addWidget(self.comboBoxXYUnits)
+        rev_layout.addWidget(QtWidgets.QLabel("Property Unit"))
+        self.comboBoxPropertyUnit = QtWidgets.QComboBox()
+        self.comboBoxPropertyUnit.addItems(
+            ["Amplitude", "P-wave", "Density", "S-Wave", "Epsilon", "Delta", "Theta"]
+        )
+        rev_layout.addWidget(self.comboBoxPropertyUnit)
         rev_layout.addStretch()
         main_layout.addLayout(rev_layout)
 
@@ -238,15 +173,27 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         form_layout.addWidget(self.lineEdit5, 3, 1)
         form_layout.addWidget(self.comboBox2, 3, 2)
 
-        (self.x_range_label, self.lineEdit6, self.comboBox3) = add_range_row(4, xrange_label)
-        form_layout.addWidget(self.x_range_label, 4, 0)
-        form_layout.addWidget(self.lineEdit6, 4, 1)
-        form_layout.addWidget(self.comboBox3, 4, 2)
+        # Source elevation immediately below source ranges
+        (self.source_elev_label, self.lineEditSourceElev, self.comboBoxSourceElev) = add_range_row(4, "Source Elevation Range")
+        form_layout.addWidget(self.source_elev_label, 4, 0)
+        form_layout.addWidget(self.lineEditSourceElev, 4, 1)
+        form_layout.addWidget(self.comboBoxSourceElev, 4, 2)
 
-        (self.y_range_label, self.lineEdit7, self.comboBox4) = add_range_row(5, yrange_label)
-        form_layout.addWidget(self.y_range_label, 5, 0)
-        form_layout.addWidget(self.lineEdit7, 5, 1)
-        form_layout.addWidget(self.comboBox4, 5, 2)
+        (self.x_range_label, self.lineEdit6, self.comboBox3) = add_range_row(5, xrange_label)
+        form_layout.addWidget(self.x_range_label, 5, 0)
+        form_layout.addWidget(self.lineEdit6, 5, 1)
+        form_layout.addWidget(self.comboBox3, 5, 2)
+
+        (self.y_range_label, self.lineEdit7, self.comboBox4) = add_range_row(6, yrange_label)
+        form_layout.addWidget(self.y_range_label, 6, 0)
+        form_layout.addWidget(self.lineEdit7, 6, 1)
+        form_layout.addWidget(self.comboBox4, 6, 2)
+
+        # Group elevation below group Y
+        (self.group_elev_label, self.lineEditGroupElev, self.comboBoxGroupElev) = add_range_row(7, "Group Elevation Range")
+        form_layout.addWidget(self.group_elev_label, 7, 0)
+        form_layout.addWidget(self.lineEditGroupElev, 7, 1)
+        form_layout.addWidget(self.comboBoxGroupElev, 7, 2)
 
         main_layout.addLayout(form_layout)
 
@@ -290,14 +237,22 @@ class ImportSEGYDialog(QtWidgets.QDialog):
          self.xlineScaleCombo,
          self.xlineManualCheck,
          self.xlineManualSpin) = add_scale_row(1, "Xline Scale")
+        (self.sourceElevScaleLabel,
+         self.sourceElevScaleCombo,
+         self.sourceElevManualCheck,
+         self.sourceElevManualSpin) = add_scale_row(2, "Source Elevation Scale")
         (self.xScaleLabel,
          self.xScaleCombo,
          self.xManualCheck,
-         self.xManualSpin) = add_scale_row(2, "X Scale")
+         self.xManualSpin) = add_scale_row(3, "X Scale")
         (self.yScaleLabel,
          self.yScaleCombo,
          self.yManualCheck,
-         self.yManualSpin) = add_scale_row(3, "Y Scale")
+         self.yManualSpin) = add_scale_row(4, "Y Scale")
+        (self.groupElevScaleLabel,
+         self.groupElevScaleCombo,
+         self.groupElevManualCheck,
+         self.groupElevManualSpin) = add_scale_row(5, "Group Elevation Scale")
 
         for combo in (
             self.inlineScaleCombo,
@@ -306,6 +261,13 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             self.yScaleCombo,
         ):
             idx = combo.findText("scalco")
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        for combo in (
+            self.sourceElevScaleCombo,
+            self.groupElevScaleCombo,
+        ):
+            idx = combo.findText("scalel")
             if idx >= 0:
                 combo.setCurrentIndex(idx)
 
@@ -366,6 +328,14 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         self.numTracesToShow.valueChanged.connect(self.PreviewSegYHeaders)
         self.spinbox1.valueChanged.connect(self.UpdateInitAndDt)
         self.spinbox2.valueChanged.connect(self.UpdateInitAndDt)
+        self.comboBoxGroupElev.currentTextChanged.connect(self.UpdateGroupElevRange)
+        self.comboBoxSourceElev.currentTextChanged.connect(self.UpdateSourceElevRange)
+        self.groupElevManualCheck.toggled.connect(lambda _: self.UpdateGroupElevRange())
+        self.groupElevManualSpin.valueChanged.connect(lambda _: self.UpdateGroupElevRange())
+        self.groupElevScaleCombo.currentTextChanged.connect(lambda _: self.UpdateGroupElevRange())
+        self.sourceElevManualCheck.toggled.connect(lambda _: self.UpdateSourceElevRange())
+        self.sourceElevManualSpin.valueChanged.connect(lambda _: self.UpdateSourceElevRange())
+        self.sourceElevScaleCombo.currentTextChanged.connect(lambda _: self.UpdateSourceElevRange())
 
     def _ensure_loaded_path(self) -> bool:
         if not self.segy_files:
@@ -511,6 +481,7 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return pd.concat(frames, ignore_index=True)
 
     def _current_header_spec(self):
+        """Choose the appropriate trace-header spec (rev0/rev1) based on inspection."""
         spec = TRACE_HEADER_REV0
         if self.inspections_by_file and 0 <= self.current_file_idx < len(self.inspections_by_file):
             insp = self.inspections_by_file[self.current_file_idx]
@@ -543,8 +514,9 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return spec
 
     def _unit_factor(self) -> float:
+        """Return multiplier to convert X/Y units combo to meters (feet -> meters)."""
         try:
-            unit_text = self.comboBoxUnits.currentText().lower()
+            unit_text = self.comboBoxXYUnits.currentText().lower()
         except Exception:
             unit_text = "meters"
         if "feet" in unit_text or "ft" in unit_text:
@@ -553,6 +525,7 @@ class ImportSEGYDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _apply_coordinate_scale(values: pd.Series, scale) -> np.ndarray:
+        """Apply SEG-Y style scaler array to a coordinate series."""
         arr = values.to_numpy(dtype=float, copy=False)
         scale_arr = np.asarray(scale, dtype=float)
         if scale_arr.ndim == 0:
@@ -567,6 +540,7 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return arr * factors
 
     def _resolve_scale_for_file(self, column: str, manual_checkbox, manual_spin, segy_file):
+        """Resolve a single scalar for a file from scaler header or manual value."""
         if manual_checkbox.isChecked():
             return manual_spin.value() or 1.0
         # Map known scalar fields
@@ -584,6 +558,7 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return val if val not in (0, None) else 1.0
 
     def _resolve_scale(self, combo, manual_checkbox, manual_spin):
+        """Resolve a per-trace scale array from the selected scaler column/manual."""
         if self.SEGY_Dataframe is None or self.SEGY_Dataframe.empty:
             raise ValueError("No headers loaded to resolve scale.")
         length = len(self.SEGY_Dataframe)
@@ -688,40 +663,54 @@ class ImportSEGYDialog(QtWidgets.QDialog):
 
     def _coord_scale_map(self, segy_file) -> dict[str, float]:
         """Determine scale per selected coordinate header for the given SEG-Y file."""
-        cols_and_scales = [
-            (self.comboBox, self.inlineScaleCombo, self.inlineManualCheck, self.inlineManualSpin),
-            (self.comboBox2, self.xlineScaleCombo, self.xlineManualCheck, self.xlineManualSpin),
-            (self.comboBox3, self.xScaleCombo, self.xManualCheck, self.xManualSpin),
-            (self.comboBox4, self.yScaleCombo, self.yManualCheck, self.yManualSpin),
-        ]
-        out = {}
-        def scale_factor(val: float) -> float:
-            if val in (None, 0):
-                return 1.0
-            return val if val > 0 else 1.0 / abs(val)
+        mode = self.GetAcquisitionType() or ""
+        # In pre-stack, Source X/Y and Group X/Y are all coordinates that can be scaled.
+        if "Pre-stack" in mode:
+            cols_and_scales = [
+                (self.comboBox, self.inlineScaleCombo, self.inlineManualCheck, self.inlineManualSpin),   # Source X
+                (self.comboBox2, self.xlineScaleCombo, self.xlineManualCheck, self.xlineManualSpin),     # Source Y
+                (self.comboBox3, self.xScaleCombo, self.xManualCheck, self.xManualSpin),                 # Group X
+                (self.comboBox4, self.yScaleCombo, self.yManualCheck, self.yManualSpin),                 # Group Y
+            ]
+        else:
+            # In post-stack, inline/crossline are not scaled; only X/Y coordinates use scalers.
+            cols_and_scales = [
+                (self.comboBox3, self.xScaleCombo, self.xManualCheck, self.xManualSpin),  # X
+                (self.comboBox4, self.yScaleCombo, self.yManualCheck, self.yManualSpin),  # Y
+            ]
+        out: dict[str, float] = {}
         for combo, scale_combo, chk, spin in cols_and_scales:
-            col = combo.currentText()
+            col = self._current_data(combo)
             if not col:
                 continue
             raw_val = self._resolve_scale_for_file(scale_combo.currentText(), chk, spin, segy_file)
-            scale_val = scale_factor(raw_val)
-            out[col] = scale_val
+            out[col] = self._scalar_factor(raw_val)
         return out
 
     def _coord_scale_arrays(self, segy_file, length: int) -> dict[str, np.ndarray]:
         """Per-trace scale factors for selected coordinate headers."""
-        cols_and_scales = [
-            (self.comboBox, self.inlineScaleCombo, self.inlineManualCheck, self.inlineManualSpin),
-            (self.comboBox2, self.xlineScaleCombo, self.xlineManualCheck, self.xlineManualSpin),
-            (self.comboBox3, self.xScaleCombo, self.xManualCheck, self.xManualSpin),
-            (self.comboBox4, self.yScaleCombo, self.yManualCheck, self.yManualSpin),
-        ]
-        out = {}
+        mode = self.GetAcquisitionType() or ""
+        if "Pre-stack" in mode:
+            cols_and_scales = [
+                (self.comboBox, self.inlineScaleCombo, self.inlineManualCheck, self.inlineManualSpin),   # Source X
+                (self.comboBox2, self.xlineScaleCombo, self.xlineManualCheck, self.xlineManualSpin),     # Source Y
+                (self.comboBox3, self.xScaleCombo, self.xManualCheck, self.xManualSpin),                 # Group X
+                (self.comboBox4, self.yScaleCombo, self.yManualCheck, self.yManualSpin),                 # Group Y
+            ]
+        else:
+            # Post-stack: only X/Y get scaling.
+            cols_and_scales = [
+                (self.comboBox3, self.xScaleCombo, self.xManualCheck, self.xManualSpin),  # X
+                (self.comboBox4, self.yScaleCombo, self.yManualCheck, self.yManualSpin),  # Y
+            ]
+        out: dict[str, np.ndarray] = {}
         for combo, scale_combo, chk, spin in cols_and_scales:
-            col = combo.currentText()
+            col = self._current_data(combo)
             if not col:
                 continue
-            scale_arr = self._resolve_scale_array_for_file(scale_combo.currentText(), chk, spin, segy_file, length)
+            scale_arr = self._resolve_scale_array_for_file(
+                scale_combo.currentText(), chk, spin, segy_file, length
+            )
             out[col] = scale_arr
         return out
 
@@ -781,11 +770,15 @@ class ImportSEGYDialog(QtWidgets.QDialog):
                         loop_start = time.time()
                         series_list = []
                         for idx, (combo, _, _, _) in enumerate(cols_and_scales):
-                            col = combo.currentText().lower()
-                            tf = tf_map.get(col)
+                            # Use raw header name (UserRole), not the decorated label,
+                            # so we can match 'sx','sy','gx','gy' correctly.
+                            col_name = self._current_data(combo).lower()
+                            tf = tf_map.get(col_name)
                             if tf is None:
                                 QtWidgets.QMessageBox.warning(
-                                    self, "Header Missing", f"Column '{col}' not supported for pre-stack check."
+                                    self,
+                                    "Header Missing",
+                                    f"Column '{col_name}' not supported for pre-stack check.",
                                 )
                                 progress.close()
                                 return None
@@ -839,21 +832,25 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return total_outside, total_traces
 
     def _all_headers(self) -> list[str]:
+        """Return the list of header names to store based on current revision spec."""
         spec = self._current_header_spec()
         return list(spec.keys())
 
     def _dataset_type_slug(self) -> str:
+        """Return a short slug like '3d-pre' or '2d-post' from the acquisition combo."""
         mode = (self.GetAcquisitionType() or "").lower()
         dim = "2d" if "2d" in mode else "3d" if "3d" in mode else "unknown"
         stack = "pre" if "pre" in mode else "post" if "post" in mode else "unknown"
         return f"{dim}-{stack}"
 
     def dataset_type(self) -> str:
+        """Public accessor for the dataset type slug."""
         return self._dataset_type_slug()
 
     def _ensure_output_paths(self) -> tuple[Path, Path]:
+        """Build/create Binaries/Geometry directories and base filenames for this import."""
         base_dir = self.survey_root
-        if base_dir is None or not base_dir.exists():
+        if base_dir is None:
             dlg = QtWidgets.QFileDialog(self, "Select output folder for SEG-Y import")
             dlg.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
             dlg.setOptions(QtWidgets.QFileDialog.Option.DontUseNativeDialog | QtWidgets.QFileDialog.Option.ShowDirsOnly)
@@ -863,6 +860,8 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             if not sel:
                 return None, None
             base_dir = Path(sel[0])
+        # If a target root was provided but doesn't exist yet, create it
+        base_dir.mkdir(parents=True, exist_ok=True)
         binaries_dir = base_dir / "Binaries"
         geometry_dir = base_dir / "Geometry"
         binaries_dir.mkdir(parents=True, exist_ok=True)
@@ -875,6 +874,7 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return binaries_dir / zarr_name, geometry_dir / geom_name
 
     def _write_subset_to_zarr(self, trace_ids: np.ndarray, zarr_path: Path, geom_path: Path) -> bool:
+        """Write a subset of traces and corresponding geometry into a new Zarr store."""
         headers = self._all_headers()
         unit_factor = self._unit_factor()
         if pa is None or pq is None:
@@ -971,27 +971,28 @@ class ImportSEGYDialog(QtWidgets.QDialog):
                     base[neg] = 1.0 / np.abs(v[neg])
                     return base
 
-                scale_map = self._coord_scale_arrays(f, len(local_ids))
-                scale_map_lower = {str(k).lower(): v for k, v in (scale_map or {}).items()}
-                for hname, vals in geom.items():
-                    vals_arr = np.asarray(vals, dtype=np.float32)
-                    key = str(hname).lower()
-                    factors = _scale_array(scale_map_lower.get(key), len(vals_arr))
-                    vals_arr = vals_arr * factors
-                    if unit_factor != 1.0:
-                        vals_arr = vals_arr * unit_factor
-                    data_dict[hname] = vals_arr
+            scale_map = self._coord_scale_arrays(f, len(local_ids))
+            scale_map_lower = {str(k).lower(): v for k, v in (scale_map or {}).items()}
+            for hname, vals in geom.items():
+                vals_arr = np.asarray(vals, dtype=np.float32)
+                key = str(hname).lower()
+                factors = _scale_array(scale_map_lower.get(key), len(vals_arr))
+                vals_arr = vals_arr * factors
+                # Apply unit factor only to coordinate-like columns
+                if unit_factor != 1.0 and key in ("sx", "sy", "gx", "gy", "x", "y", "cdpx", "cdpy"):
+                    vals_arr = vals_arr * unit_factor
+                data_dict[hname] = vals_arr
 
-                if pa is not None and pq is not None:
-                    table = pa.Table.from_pydict(data_dict)
-                    if arrow_writer is None:
-                        arrow_writer = pq.ParquetWriter(geom_path, table.schema)
-                    arrow_writer.write_table(table)
-                else:
-                    pending_frames.append(pd.DataFrame(data_dict))
+        if pa is not None and pq is not None:
+            table = pa.Table.from_pydict(data_dict)
+            if arrow_writer is None:
+                arrow_writer = pq.ParquetWriter(geom_path, table.schema)
+            arrow_writer.write_table(table)
+        else:
+            pending_frames.append(pd.DataFrame(data_dict))
 
-                offset_out = end_out
-                cumulative += ntr
+        offset_out = end_out
+        cumulative += ntr
 
         if arrow_writer is not None:
             arrow_writer.close()
@@ -1006,6 +1007,7 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return True
 
     def _load_and_save_traces(self, trace_ids: np.ndarray | None = None):
+        """Main import routine: stream SEG-Y to Zarr + geometry (full or subset)."""
         zarr_path, geom_path = self._ensure_output_paths()
         if not zarr_path or not geom_path:
             return False
@@ -1074,6 +1076,7 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return True
 
     def _selected_headers_metadata(self) -> dict:
+        """Collect selected headers, scaled ranges and z sampling into a metadata dict."""
         def scaled_range(column_attr: str, scale_attr: str):
             col = getattr(self, column_attr, None)
             scale = getattr(self, scale_attr, None)
@@ -1128,32 +1131,96 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         return meta
 
     def GetAcquisitionType(self):
+        """Return acquisition type string from combo (e.g. '3D Post-stack')."""
         return self.comboBoxMode.currentText()
 
+    @staticmethod
+    def _label_with_bytes(name: str, spec: dict) -> str:
+        """Format a header name with its byte range, e.g. 'sx (Bytes 73-76)'."""
+        if name in spec:
+            start, length = spec[name]
+            end = start + length - 1
+            return f"{name} (Bytes {start}-{end})"
+        return name
+
+    @staticmethod
+    def _set_combo_items(combo: QtWidgets.QComboBox, columns, spec: dict):
+        combo.clear()
+        for c in columns:
+            label = ImportSEGYDialog._label_with_bytes(c, spec)
+            combo.addItem(label, userData=c)
+
+    @staticmethod
+    def _set_current_by_data(combo: QtWidgets.QComboBox, target: str):
+        if target is None:
+            return
+        for i in range(combo.count()):
+            if combo.itemData(i, QtCore.Qt.ItemDataRole.UserRole) == target:
+                combo.setCurrentIndex(i)
+                return
+
+    @staticmethod
+    def _current_data(combo: QtWidgets.QComboBox) -> str:
+        data = combo.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        return data if data else combo.currentText()
+
+    @staticmethod
+    def _scalar_factor(val: float) -> float:
+        """Return scalar using SEG-Y rule (negative => reciprocal)."""
+        if val in (None, 0):
+            return 1.0
+        return val if val > 0 else 1.0 / abs(val)
+
     def UpdateInline(self):
-        self.selected_inline_column = self.comboBox.currentText()
-        self.ilineScale = self._resolve_scale(self.inlineScaleCombo, self.inlineManualCheck, self.inlineManualSpin)
+        """Handle inline/source X header change and update range preview (scaled for pre-stack)."""
+        self.selected_inline_column = self._current_data(self.comboBox)
 
         if self.SEGY_Dataframe is not None and isinstance(self.SEGY_Dataframe, pd.DataFrame):
-            scaled = self._apply_coordinate_scale(self.SEGY_Dataframe[self.selected_inline_column], self.ilineScale)
-            init = np.min(scaled)
-            end = np.max(scaled)
-            text = "%i - %i" % (init,end)
+            values = self.SEGY_Dataframe[self.selected_inline_column]
+            mode = self.GetAcquisitionType() or ""
+            try:
+                if "Pre-stack" in mode:
+                    scale_arr = self._resolve_scale(self.inlineScaleCombo, self.inlineManualCheck, self.inlineManualSpin)
+                    scaled = self._apply_coordinate_scale(values, scale_arr)
+                    init = float(np.nanmin(scaled))
+                    end = float(np.nanmax(scaled))
+                    text = "%.2f - %.2f" % (init, end)
+                else:
+                    init = np.min(values)
+                    end = np.max(values)
+                    text = "%i - %i" % (init, end)
+            except Exception:
+                init = np.min(values)
+                end = np.max(values)
+                text = "%i - %i" % (init, end)
             self.lineEdit4.setText(text)
 
     def UpdateXline(self):
-        self.selected_xline_column = self.comboBox2.currentText()
-        self.xlineScale = self._resolve_scale(self.xlineScaleCombo, self.xlineManualCheck, self.xlineManualSpin)
+        """Handle crossline/source Y header change and update range preview (scaled for pre-stack)."""
+        self.selected_xline_column = self._current_data(self.comboBox2)
 
         if self.SEGY_Dataframe is not None and isinstance(self.SEGY_Dataframe, pd.DataFrame):
-            scaled = self._apply_coordinate_scale(self.SEGY_Dataframe[self.selected_xline_column], self.xlineScale)
-            init = np.min(scaled)
-            end = np.max(scaled)
-            text = "%i - %i" % (init,end)
+            values = self.SEGY_Dataframe[self.selected_xline_column]
+            mode = self.GetAcquisitionType() or ""
+            try:
+                if "Pre-stack" in mode:
+                    scale_arr = self._resolve_scale(self.xlineScaleCombo, self.xlineManualCheck, self.xlineManualSpin)
+                    scaled = self._apply_coordinate_scale(values, scale_arr)
+                    init = float(np.nanmin(scaled))
+                    end = float(np.nanmax(scaled))
+                    text = "%.2f - %.2f" % (init, end)
+                else:
+                    init = np.min(values)
+                    end = np.max(values)
+                    text = "%i - %i" % (init, end)
+            except Exception:
+                init = np.min(values)
+                end = np.max(values)
+                text = "%i - %i" % (init, end)
             self.lineEdit5.setText(text)
     
     def UpdateXRange(self):
-        self.selected_xrange_column = self.comboBox3.currentText()
+        self.selected_xrange_column = self._current_data(self.comboBox3)
         self.xScale = self._resolve_scale(self.xScaleCombo, self.xManualCheck, self.xManualSpin)
 
         if self.SEGY_Dataframe is not None and isinstance(self.SEGY_Dataframe, pd.DataFrame):
@@ -1164,7 +1231,7 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             self.lineEdit6.setText(text)
 
     def UpdateYRange(self):
-        self.selected_yrange_column = self.comboBox4.currentText()
+        self.selected_yrange_column = self._current_data(self.comboBox4)
         self.yScale = self._resolve_scale(self.yScaleCombo, self.yManualCheck, self.yManualSpin)
 
         if self.SEGY_Dataframe is not None and isinstance(self.SEGY_Dataframe, pd.DataFrame):
@@ -1173,6 +1240,32 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             end = np.max(scaled)
             text = "%.2f - %.2f" % (init,end)
             self.lineEdit7.setText(text)
+
+    def UpdateGroupElevRange(self):
+        self.selected_group_elev_column = self._current_data(self.comboBoxGroupElev)
+        self.groupElevScale = self._resolve_scale(
+            self.groupElevScaleCombo, self.groupElevManualCheck, self.groupElevManualSpin
+        )
+        if self.SEGY_Dataframe is not None and isinstance(self.SEGY_Dataframe, pd.DataFrame):
+            vals = self.SEGY_Dataframe[self.selected_group_elev_column]
+            scaled = self._apply_coordinate_scale(vals, self.groupElevScale)
+            init = np.nanmin(scaled)
+            end = np.nanmax(scaled)
+            text = "%.2f - %.2f" % (init, end)
+            self.lineEditGroupElev.setText(text)
+
+    def UpdateSourceElevRange(self):
+        self.selected_source_elev_column = self._current_data(self.comboBoxSourceElev)
+        self.sourceElevScale = self._resolve_scale(
+            self.sourceElevScaleCombo, self.sourceElevManualCheck, self.sourceElevManualSpin
+        )
+        if self.SEGY_Dataframe is not None and isinstance(self.SEGY_Dataframe, pd.DataFrame):
+            vals = self.SEGY_Dataframe[self.selected_source_elev_column]
+            scaled = self._apply_coordinate_scale(vals, self.sourceElevScale)
+            init = np.nanmin(scaled)
+            end = np.nanmax(scaled)
+            text = "%.2f - %.2f" % (init, end)
+            self.lineEditSourceElev.setText(text)
 
     def UpdateInitAndDt(self):
         self.init = self.spinbox1.value()
@@ -1253,6 +1346,10 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             self.UpdateXRange()
         if self.comboBox4.count():
             self.UpdateYRange()
+        if self.comboBoxGroupElev.count():
+            self.UpdateGroupElevRange()
+        if self.comboBoxSourceElev.count():
+            self.UpdateSourceElevRange()
 
     def load_column_names(self, preserve_selection: bool = False):
         """Populate combo boxes with sensible defaults based on acquisition type."""
@@ -1263,11 +1360,13 @@ class ImportSEGYDialog(QtWidgets.QDialog):
 
         columns = []
         prev_selection = (
-            self.comboBox.currentText(),
-            self.comboBox2.currentText(),
-            self.comboBox3.currentText(),
-            self.comboBox4.currentText(),
-        ) if preserve_selection else (None, None, None, None)
+            self._current_data(self.comboBox),
+            self._current_data(self.comboBox2),
+            self._current_data(self.comboBox3),
+            self._current_data(self.comboBox4),
+            self._current_data(self.comboBoxGroupElev),
+            self._current_data(self.comboBoxSourceElev),
+        ) if preserve_selection else (None, None, None, None, None, None)
 
         if self.SEGY_Dataframe is not None and not self.SEGY_Dataframe.empty:
             columns = list(dict.fromkeys(self.SEGY_Dataframe.columns))
@@ -1281,34 +1380,60 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             if not columns:
                 columns = list(spec.keys())[:4]
 
+        # Ensure elevation headers appear even before SEG-Y is loaded
+        if "Pre-stack" in mode:
+            if "gelev" not in columns:
+                columns.insert(0, "gelev")
+            if "selev" not in columns:
+                columns.insert(0, "selev")
+
         self.comboBox.blockSignals(True)
         self.comboBox2.blockSignals(True)
         self.comboBox3.blockSignals(True)
         self.comboBox4.blockSignals(True)
-        self.comboBox.clear()
-        self.comboBox2.clear()
-        self.comboBox3.clear()
-        self.comboBox4.clear()
-        self.comboBox.addItems(columns)
-        self.comboBox2.addItems(columns)
-        self.comboBox3.addItems(columns)
-        self.comboBox4.addItems(columns)
-        defaults = [0, 1, 2, 3]
-        combos = [self.comboBox, self.comboBox2, self.comboBox3, self.comboBox4]
-        pre_defaults = ["sx", "sy", "gx", "gy"]
+        self.comboBoxGroupElev.blockSignals(True)
+        self.comboBoxSourceElev.blockSignals(True)
+        self.sourceElevScaleCombo.blockSignals(True)
+        self.groupElevScaleCombo.blockSignals(True)
+        # Populate combos with labels including byte ranges
+        spec = self.trace_header_spec
+        self._set_combo_items(self.comboBox, columns, spec)
+        self._set_combo_items(self.comboBox2, columns, spec)
+        self._set_combo_items(self.comboBox3, columns, spec)
+        self._set_combo_items(self.comboBox4, columns, spec)
+        self._set_combo_items(self.comboBoxGroupElev, columns, spec)
+        self._set_combo_items(self.comboBoxSourceElev, columns, spec)
+        defaults = [0, 1, 2, 3, 0, 0]
+        combos = [
+            self.comboBox,
+            self.comboBox2,
+            self.comboBox3,
+            self.comboBox4,
+            self.comboBoxGroupElev,
+            self.comboBoxSourceElev,
+        ]
+        pre_defaults = ["sx", "sy", "gx", "gy", "gelev", "selev"]
         for idx, combo in enumerate(combos):
             if preserve_selection and prev_selection[idx] in columns:
-                combo.setCurrentText(prev_selection[idx])
+                self._set_current_by_data(combo, prev_selection[idx])
                 continue
             if "3D Pre-stack" in mode or "2D Pre-stack" in mode:
                 target = pre_defaults[idx]
                 if target in columns:
-                    combo.setCurrentText(target)
+                    self._set_current_by_data(combo, target)
                     continue
             if combo.count() > defaults[idx]:
                 combo.setCurrentIndex(defaults[idx])
             elif combo.count() > 0:
                 combo.setCurrentIndex(0)
+        # Explicit defaults for elevation headers when available
+        if "gelev" in columns:
+            self._set_current_by_data(self.comboBoxGroupElev, "gelev")
+        if "selev" in columns:
+            self._set_current_by_data(self.comboBoxSourceElev, "selev")
+        # Force selev when in pre-stack modes even if a previous selection was kept
+        if ("Pre-stack" in mode) and ("selev" in columns):
+            self._set_current_by_data(self.comboBoxSourceElev, "selev")
 
         if "3D Pre-stack" in mode or "2D Pre-stack" in mode:
             range_labels = ("Source X Range", "Source Y Range", "Group X Range", "Group Y Range")
@@ -1322,6 +1447,17 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             range_labels,
         ):
             label_widget.setText(text)
+        # Elevation rows visible only for pre-stack
+        is_prestack = "Pre-stack" in mode
+        for widget in (
+            self.group_elev_label,
+            self.lineEditGroupElev,
+            self.comboBoxGroupElev,
+            self.source_elev_label,
+            self.lineEditSourceElev,
+            self.comboBoxSourceElev,
+        ):
+            widget.setVisible(is_prestack)
 
         for label_widget, text in zip(
             (self.inlineScaleLabel, self.xlineScaleLabel, self.xScaleLabel, self.yScaleLabel),
@@ -1329,10 +1465,41 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         ):
             label_widget.setText(text)
 
+        # Hide inline/xline scales for 3D post-stack
+        is_3d_post = "3D Post-stack" in mode
+        for widget in (
+            self.inlineScaleLabel,
+            self.inlineScaleCombo,
+            self.inlineManualCheck,
+            self.inlineManualSpin,
+            self.xlineScaleLabel,
+            self.xlineScaleCombo,
+            self.xlineManualCheck,
+            self.xlineManualSpin,
+        ):
+            widget.setVisible(not is_3d_post)
+
+        # Elevation scales visible only for pre-stack
+        for widget in (
+            self.sourceElevScaleLabel,
+            self.sourceElevScaleCombo,
+            self.sourceElevManualCheck,
+            self.sourceElevManualSpin,
+            self.groupElevScaleLabel,
+            self.groupElevScaleCombo,
+            self.groupElevManualCheck,
+            self.groupElevManualSpin,
+        ):
+            widget.setVisible(is_prestack)
+
         self.comboBox.blockSignals(False)
         self.comboBox2.blockSignals(False)
         self.comboBox3.blockSignals(False)
         self.comboBox4.blockSignals(False)
+        self.comboBoxGroupElev.blockSignals(False)
+        self.comboBoxSourceElev.blockSignals(False)
+        self.sourceElevScaleCombo.blockSignals(False)
+        self.groupElevScaleCombo.blockSignals(False)
         self.column_names = columns
         
     def ShowSEGYTextHeader(self):
@@ -1440,8 +1607,69 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         self._apply_current_file_headers()
 
     def accept(self):
-        # For pre-stack data, perform trace-outside check when pressing OK
-        if "Pre-stack" in (self.GetAcquisitionType() or ""):
+        mode = self.GetAcquisitionType() or ""
+
+        # Pre-stack data
+        if "Pre-stack" in mode:
+            # New survey: derive boundary from scaled source/group coordinates and import all traces
+            if self.is_new_survey:
+                headers = self._load_trace_headers(max_traces=None, per_file=False)
+                if headers is None or headers.empty:
+                    QtWidgets.QMessageBox.warning(self, "Trace Check", "Failed to read headers for boundary check.")
+                    return
+                sx_col = getattr(self, "selected_inline_column", None)
+                sy_col = getattr(self, "selected_xline_column", None)
+                gx_col = getattr(self, "selected_xrange_column", None)
+                gy_col = getattr(self, "selected_yrange_column", None)
+                try:
+                    sx_vals = headers[sx_col].to_numpy(dtype=float, copy=False)
+                    sy_vals = headers[sy_col].to_numpy(dtype=float, copy=False)
+                    gx_vals = headers[gx_col].to_numpy(dtype=float, copy=False)
+                    gy_vals = headers[gy_col].to_numpy(dtype=float, copy=False)
+                except Exception:
+                    QtWidgets.QMessageBox.warning(self, "Trace Check", "Missing Source/Group X/Y columns.")
+                    return
+                # Apply scalers to all four coordinate sets
+                sx_scale = self._scale_array_from_df(
+                    headers, self.inlineScaleCombo.currentText(), self.inlineManualCheck, self.inlineManualSpin
+                )
+                sy_scale = self._scale_array_from_df(
+                    headers, self.xlineScaleCombo.currentText(), self.xlineManualCheck, self.xlineManualSpin
+                )
+                gx_scale = self._scale_array_from_df(
+                    headers, self.xScaleCombo.currentText(), self.xManualCheck, self.xManualSpin
+                )
+                gy_scale = self._scale_array_from_df(
+                    headers, self.yScaleCombo.currentText(), self.yManualCheck, self.yManualSpin
+                )
+                sx_scaled = sx_vals * sx_scale
+                sy_scaled = sy_vals * sy_scale
+                gx_scaled = gx_vals * gx_scale
+                gy_scaled = gy_vals * gy_scale
+
+                # Overall survey extents from both source and group coordinates
+                x_min = float(np.nanmin([sx_scaled.min(), gx_scaled.min()]))
+                x_max = float(np.nanmax([sx_scaled.max(), gx_scaled.max()]))
+                y_min = float(np.nanmin([sy_scaled.min(), gy_scaled.min()]))
+                y_max = float(np.nanmax([sy_scaled.max(), gy_scaled.max()]))
+
+                # Store boundary in the same metadata structure used elsewhere
+                self.survey_boundary = {
+                    "boundary": {
+                        "x_range": [x_min, x_max],
+                        "y_range": [y_min, y_max],
+                        "x_min": x_min,
+                        "x_max": x_max,
+                        "y_min": y_min,
+                        "y_max": y_max,
+                    }
+                }
+                if not self._load_and_save_traces():
+                    return
+                super().accept()
+                return
+
+            # Existing survey: run pre-stack boundary check against stored bounds
             import time
             t0 = time.time()
             print("[TraceCheck] Starting pre-stack boundary check...")
@@ -1481,58 +1709,213 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             super().accept()
             return
 
+
         # Post-stack: boundary check using sx/sy only
-        bounds = self._extract_boundary()
-        if bounds is None:
-            QtWidgets.QMessageBox.information(self, "Boundary Missing", "No survey bounding box is available to check traces.")
-            return
-        x_min, x_max, y_min, y_max = bounds
-        # load headers to check
-        headers = self._load_trace_headers(max_traces=None, per_file=False)
-        if headers is None or headers.empty:
-            QtWidgets.QMessageBox.warning(self, "Trace Check", "Failed to read headers for boundary check.")
-            return
-        sx_col = self.selected_xrange_column
-        sy_col = self.selected_yrange_column
-        try:
-            sx_vals = headers[sx_col].to_numpy(dtype=float, copy=False)
-            sy_vals = headers[sy_col].to_numpy(dtype=float, copy=False)
-        except Exception:
-            QtWidgets.QMessageBox.warning(self, "Trace Check", "Missing X/Y columns for boundary check.")
-            return
-        sx_scale = self._scale_array_from_df(headers, self.xScaleCombo.currentText(), self.xManualCheck, self.xManualSpin)
-        sy_scale = self._scale_array_from_df(headers, self.yScaleCombo.currentText(), self.yManualCheck, self.yManualSpin)
-        unit_factor = self._unit_factor()
-        sx_scaled = sx_vals * sx_scale
-        sy_scaled = sy_vals * sy_scale
-        mask_out = (sx_scaled < x_min) | (sx_scaled > x_max) | (sy_scaled < y_min) | (sy_scaled > y_max)
-        outside = int(mask_out.sum())
-        total = len(sx_vals)
-        if outside == 0:
-            QtWidgets.QMessageBox.information(self, "Trace Check", "All traces are inside the survey bounding box.")
-            if not self._load_and_save_traces():
+        if not self.is_new_survey:
+            bounds = self._extract_boundary()
+            if bounds is None:
+                QtWidgets.QMessageBox.information(self, "Boundary Missing", "No survey bounding box is available to check traces.")
                 return
+            x_min, x_max, y_min, y_max = bounds
+            # load headers to check
+            headers = self._load_trace_headers(max_traces=None, per_file=False)
+            if headers is None or headers.empty:
+                QtWidgets.QMessageBox.warning(self, "Trace Check", "Failed to read headers for boundary check.")
+                return
+            sx_col = self.selected_xrange_column
+            sy_col = self.selected_yrange_column
+            try:
+                sx_vals = headers[sx_col].to_numpy(dtype=float, copy=False)
+                sy_vals = headers[sy_col].to_numpy(dtype=float, copy=False)
+            except Exception:
+                QtWidgets.QMessageBox.warning(self, "Trace Check", "Missing X/Y columns for boundary check.")
+                return
+            sx_scale = self._scale_array_from_df(headers, self.xScaleCombo.currentText(), self.xManualCheck, self.xManualSpin)
+            sy_scale = self._scale_array_from_df(headers, self.yScaleCombo.currentText(), self.yManualCheck, self.yManualSpin)
+            sx_scaled = sx_vals * sx_scale
+            sy_scaled = sy_vals * sy_scale
+            mask_out = (sx_scaled < x_min) | (sx_scaled > x_max) | (sy_scaled < y_min) | (sy_scaled > y_max)
+            outside = int(mask_out.sum())
+            total = len(sx_vals)
+            if outside == 0:
+                QtWidgets.QMessageBox.information(self, "Trace Check", "All traces are inside the survey bounding box.")
+                if not self._load_and_save_traces():
+                    return
+            else:
+                reply = QtWidgets.QMessageBox.question(
+                    self,
+                    "Trace Check",
+                    f"{outside} of {total} traces are outside the survey bounding box.\n"
+                    f"Load the {total - outside} inside traces?",
+                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.No,
+                )
+                if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+                inside_ids = np.nonzero(~mask_out)[0].astype(np.int64)
+                if inside_ids.size == 0:
+                    QtWidgets.QMessageBox.information(self, "Trace Check", "No traces inside the bounding box to load.")
+                    return
+                if not self._load_and_save_traces(trace_ids=inside_ids):
+                    return
         else:
-            reply = QtWidgets.QMessageBox.question(
-                self,
-                "Trace Check",
-                f"{outside} of {total} traces are outside the survey bounding box.\n"
-                f"Load the {total - outside} inside traces?",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                QtWidgets.QMessageBox.StandardButton.No,
-            )
-            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+
+            # load headers to check
+            headers = self._load_trace_headers(max_traces=None, per_file=False)
+            if headers is None or headers.empty:
+                QtWidgets.QMessageBox.warning(self, "Trace Check", "Failed to read headers for boundary check.")
                 return
-            inside_ids = np.nonzero(~mask_out)[0].astype(np.int64)
-            if inside_ids.size == 0:
-                QtWidgets.QMessageBox.information(self, "Trace Check", "No traces inside the bounding box to load.")
+            sx_col = self.selected_xrange_column
+            sy_col = self.selected_yrange_column
+            try:
+                sx_vals = headers[sx_col].to_numpy(dtype=float, copy=False)
+                sy_vals = headers[sy_col].to_numpy(dtype=float, copy=False)
+            except Exception:
+                QtWidgets.QMessageBox.warning(self, "Trace Check", "Missing X/Y columns for boundary check.")
                 return
-            if not self._load_and_save_traces(trace_ids=inside_ids):
-                return
+            sx_scale = self._scale_array_from_df(headers, self.xScaleCombo.currentText(), self.xManualCheck, self.xManualSpin)
+            sy_scale = self._scale_array_from_df(headers, self.yScaleCombo.currentText(), self.yManualCheck, self.yManualSpin)
+            sx_scaled = sx_vals * sx_scale
+            sy_scaled = sy_vals * sy_scale
+
+            x_min = sx_scaled.min()
+            x_max = sx_scaled.max()
+            y_min = sy_scaled.min()
+            y_max = sy_scaled.max()
+
+            # A better center for a rotated survey: mean of all points
+            center_x = float(np.nanmean(sx_scaled))
+            center_y = float(np.nanmean(sy_scaled))
+
+            # Derive inline/xline ranges and azimuth if headers are present
+            inline_range = None
+            xline_range = None
+            inline_inc = None
+            xline_inc = None
+            azimuth_deg = None
+            
+            try:
+                il_col = getattr(self, "selected_inline_column", None)
+                xl_col = getattr(self, "selected_xline_column", None)
+
+                il_vals = (
+                    headers[il_col].to_numpy(dtype=float, copy=False)
+                    if il_col is not None and il_col in headers
+                    else None
+                )
+                xl_vals = (
+                    headers[xl_col].to_numpy(dtype=float, copy=False)
+                    if xl_col is not None and xl_col in headers
+                    else None
+                )
+
+                # Need both inline and xline to find corners
+                if il_vals is not None and xl_vals is not None and il_vals.size and xl_vals.size:
+                    valid = (
+                        ~np.isnan(il_vals)
+                        & ~np.isnan(xl_vals)
+                        & ~np.isnan(sx_scaled)
+                        & ~np.isnan(sy_scaled)
+                    )
+                    ilv = il_vals[valid]
+                    xlv = xl_vals[valid]
+                    sxv = sx_scaled[valid]
+                    syv = sy_scaled[valid]
+
+                    # Inline/xline numeric ranges and increments
+                    if ilv.size:
+                        inline_range = [float(np.min(ilv)), float(np.max(ilv))]
+                        uniq_il = np.unique(ilv)
+                        if uniq_il.size > 1:
+                            inline_inc = float(
+                                np.median(np.diff(np.sort(uniq_il)))
+                            )
+                    if xlv.size:
+                        xline_range = [float(np.min(xlv)), float(np.max(xlv))]
+                        uniq_xl = np.unique(xlv)
+                        if uniq_xl.size > 1:
+                            xline_inc = float(
+                                np.median(np.diff(np.sort(uniq_xl)))
+                            )
+
+                    # --- 2. Build inline/xline -> (sx, sy) centroids ---
+                    df = pd.DataFrame(
+                        {"il": ilv, "xl": xlv, "sx": sxv, "sy": syv}
+                    )
+                    cent = (
+                        df.groupby(["il", "xl"])[["sx", "sy"]]
+                        .mean()
+                        .reset_index()
+                    )
+
+                    il_min = float(np.min(ilv))
+                    il_max = float(np.max(ilv))
+                    xl_min = float(np.min(xlv))
+                    xl_max = float(np.max(xlv))
+
+                    def _corner(ili: float, xli: float) -> tuple[float, float]:
+                        sub = cent[(cent["il"] == ili) & (cent["xl"] == xli)]
+                        if sub.empty:
+                            raise ValueError(
+                                f"Missing corner at inline={ili}, xline={xli}"
+                            )
+                        return float(sub["sx"].iloc[0]), float(sub["sy"].iloc[0])
+
+                    # Corners in (inline,xline) index space:
+                    # (il_min, xl_min), (il_max, xl_min), (il_max, xl_max), (il_min, xl_max)
+                    p00 = _corner(il_min, xl_min)
+                    p10 = _corner(il_max, xl_min)
+                    p11 = _corner(il_max, xl_max)
+                    p01 = _corner(il_min, xl_max)
+
+                    corners = [p00, p10, p11, p01]  # consistent ordering around the cube
+
+                    # Override center with average of corners (more robust for tilted survey)
+                    center_x = (p00[0] + p10[0] + p11[0] + p01[0]) / 4.0
+                    center_y = (p00[1] + p10[1] + p11[1] + p01[1]) / 4.0
+
+                    # --- 3. Inline direction from corners -> azimuth ---
+                    # Inline edges: p00->p10 and p01->p11 (same direction ideally)
+                    dE_il = 0.5 * ((p10[0] - p00[0]) + (p11[0] - p01[0]))
+                    dN_il = 0.5 * ((p10[1] - p00[1]) + (p11[1] - p01[1]))
+
+                    # Azimuth (0° = North, clockwise), using UTM (E,N):
+                    # az = atan2(ΔE, ΔN)
+                    if dE_il != 0.0 or dN_il != 0.0:
+                        az = np.degrees(np.arctan2(dE_il, dN_il))
+                        if az < 0.0:
+                            az += 360.0
+                        azimuth_deg = float(az)
+
+            except Exception:
+                # If anything fails above, we still keep x/y ranges and center
+                pass
+
+            # --- 4. Store everything in survey_boundary, including corners ---
+            self.survey_boundary = {
+                "boundary": {
+                    "x_range": [x_min, x_max],
+                    "y_range": [y_min, y_max],
+                    "x_min": x_min,
+                    "x_max": x_max,
+                    "y_min": y_min,
+                    "y_max": y_max,
+                    "center_x": center_x,
+                    "center_y": center_y,
+                    "inline_range": inline_range,
+                    "xline_range": xline_range,
+                    "inline_increment": inline_inc,
+                    "xline_increment": xline_inc,
+                    "corners": corners,              # list of 4 (x, y)
+                    "azimuth_degrees": azimuth_deg,  # inline azimuth, 0° = North CW
+                }
+            }
+            
+            if not self._load_and_save_traces():
+                    return
+
         super().accept()
-        
-    # def PassChildClassValues(self, parentClass):
-    #     parentClass.
+
 
 
 class ManualSurveyDialog(QtWidgets.QDialog):
@@ -1788,392 +2171,4 @@ class NewSurveyDialog(QtWidgets.QDialog):
         if selected_indexes:  # Ensure something is selected
             selected_import = selected_indexes[0].data()  # Get the text of the selected item
             return selected_import
-        return None
-        
-
-class DialogBox(QtWidgets.QDialog):
-    """Custom QDialog class for the secondary dialog."""
-    def __init__(self, main, selected_survey: str | None = None):
-        super().__init__()
-        self.main = main
-        self.initial_selection = selected_survey
-        self.setWindowTitle("Select/Setup Survey")
-        self.resize(640, 500)
-
-        self.figure = Figure(figsize=(3, 3))
-        self.canvas = FigureCanvas(self.figure)
-        self.range_label = QtWidgets.QLabel()
-        self.range_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.range_label.setWordWrap(True)
-
-        self.newSurveyButton = QtWidgets.QPushButton("New")
-        self.deleteSurveyButton = QtWidgets.QPushButton("Delete")
-        self.renameSurveyButton = QtWidgets.QPushButton("Rename")
-        button_row = QtWidgets.QHBoxLayout()
-        button_row.addWidget(self.newSurveyButton)
-        button_row.addWidget(self.renameSurveyButton)
-        button_row.addWidget(self.deleteSurveyButton)
-        button_row.addStretch()
-
-        self.surveyListView = QtWidgets.QListView()
-        self.model = QStringListModel()
-        self.model.setStringList(main.folder_list)
-        self.surveyListView.setModel(self.model)
-
-        left_layout = QtWidgets.QVBoxLayout()
-        left_layout.addLayout(button_row)
-        left_layout.addWidget(self.surveyListView)
-
-        right_layout = QtWidgets.QVBoxLayout()
-        right_layout.addWidget(self.canvas, stretch=1)
-        right_layout.addWidget(self.range_label)
-
-        main_layout = QtWidgets.QHBoxLayout()
-        main_layout.addLayout(left_layout, stretch=1)
-        main_layout.addLayout(right_layout, stretch=1)
-
-        button_box = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-
-        root_layout = QtWidgets.QVBoxLayout(self)
-        root_layout.addLayout(main_layout)
-        root_layout.addWidget(button_box)
-
-        self.newSurveyButton.clicked.connect(self.CreateNewSurvey)
-        self.deleteSurveyButton.clicked.connect(self.DeleteSurvey)
-        self.renameSurveyButton.clicked.connect(self.RenameSurvey)
-        self.surveyListView.selectionModel().currentChanged.connect(self._on_survey_selected)
-        self.UpdateSurveyList(select_name=self.initial_selection)
-
-    def DeleteSurvey(self):
-        selected_survey = self.GetSelectedSurvey()
-        
-        if selected_survey is not None:
-            folder_path = os.path.join(self.main.rootFolderPath, selected_survey)
-            # ✅ Show confirmation dialog
-            reply = QtWidgets.QMessageBox.question(
-                self,
-                "Confirm Deletion",
-                f"Are you sure you want to delete the survey\n{selected_survey}?",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                QtWidgets.QMessageBox.StandardButton.No  # Default to "No"
-            )
-
-            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            
-                if os.path.exists(folder_path) and os.path.isdir(folder_path):
-                    shutil.rmtree(folder_path)
-                    print(f"Folder '{folder_path}' deleted successfully!")
-                else:
-                    print(f"Error: Folder '{folder_path}' does not exist.")
-
-                if selected_survey in self.main.folder_list:
-                    self.main.folder_list.remove(selected_survey)
-
-                delete_project(name=selected_survey)
-
-                self.UpdateSurveyList()
-
-    def RenameSurvey(self):
-        selected_survey = self.GetSelectedSurvey()
-        if not selected_survey:
-            QtWidgets.QMessageBox.information(self, "Rename Survey", "Please select a survey first.")
-            return
-        new_name, ok = QtWidgets.QInputDialog.getText(self, "Rename Survey", "New survey name:", text=selected_survey)
-        if not ok or not new_name or new_name == selected_survey:
-            return
-        old_path = os.path.join(self.main.rootFolderPath, selected_survey)
-        new_path = os.path.join(self.main.rootFolderPath, new_name)
-        if os.path.exists(new_path):
-            QtWidgets.QMessageBox.warning(self, "Rename Survey", "A survey with that name already exists.")
-            return
-        try:
-            os.rename(old_path, new_path)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Rename Survey", f"Failed to rename folder:\n{exc}")
-            return
-        try:
-            rename_project(selected_survey, new_name, Path(new_path))
-        except Exception as exc:
-            # attempt to revert folder rename to avoid inconsistency
-            try:
-                os.rename(new_path, old_path)
-            except Exception:
-                pass
-            QtWidgets.QMessageBox.warning(self, "Rename Survey", f"Failed to update catalog:\n{exc}")
-            return
-        # Update state
-        if selected_survey in self.main.folder_list:
-            self.main.folder_list.remove(selected_survey)
-        if new_name not in self.main.folder_list:
-            self.main.folder_list.append(new_name)
-        self.main.folder_list = sorted(self.main.folder_list, key=str.lower)
-        if self.main.currentSurveyName == selected_survey:
-            self.main.currentSurveyName = new_name
-            self.main.currentSurveyPath = new_path
-        self._update_manifest_paths(old_path, new_path)
-        self.UpdateSurveyList(select_name=new_name)
-
-    def _update_manifest_paths(self, old_root: str, new_root: str):
-        """Re-point manifest absolute paths after a survey rename."""
-        try:
-            old_root_path = Path(old_root).resolve()
-            new_root_path = Path(new_root).resolve()
-            bin_dir = new_root_path / "Binaries"
-            if not bin_dir.exists():
-                return
-            for manifest_path in bin_dir.glob("*.manifest.json"):
-                try:
-                    data = json.loads(manifest_path.read_text())
-                except Exception:
-                    continue
-                updated = False
-                for key in ("geometry_parquet", "zarr_store"):
-                    val = data.get(key)
-                    if not val or not isinstance(val, str):
-                        continue
-                    try:
-                        p = Path(val).resolve()
-                        rel = p.relative_to(old_root_path)
-                        new_val = str(new_root_path / rel)
-                    except Exception:
-                        # Fallback: string replace
-                        if old_root in val:
-                            new_val = val.replace(old_root, str(new_root_path))
-                        else:
-                            continue
-                    if new_val != val:
-                        data[key] = new_val
-                        updated = True
-                if updated:
-                    try:
-                        manifest_path.write_text(json.dumps(data, indent=2))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    def CreateNewFolders(self):
-        #create main folder
-        os.mkdir(self.surveyPath)
-
-        #create binaries folder
-        os.mkdir(self.surveyPath + "/Binaries/")
-
-        #create geometry folder
-        os.mkdir(self.surveyPath + "/Geometry/")
-
-        #create JSON folder
-        os.mkdir(self.surveyPath + "/JSON/")
-    
-
-    def CreateSurveyFolder(self, survey_name, metadata=None):
-
-        if survey_name:
-            self.surveyPath = os.path.join(self.main.rootFolderPath, survey_name)
-            if not os.path.exists(self.surveyPath):
-
-                self.CreateNewFolders()
-
-                ensure_project(
-                    name=survey_name,
-                    root_path=Path(self.surveyPath),
-                    description="Survey created via GUI",
-                    metadata=metadata or {},
-                )
-
-                if survey_name not in self.main.folder_list:
-                    self.main.folder_list.append(survey_name)
-                    self.main.folder_list = sorted(self.main.folder_list, key=str.lower)
-
-                # ✅ Refresh the list in surveyListView
-                self.UpdateSurveyList(select_name=survey_name)
-
-                # shows that it was sucessfull
-                QtWidgets.QMessageBox.information(self, "Success", f"Survey '{survey_name}' created successfully!")
-            else:
-                QtWidgets.QMessageBox.warning(self, "Warning", "Survey with this name already exists!")
-
-    
-    def CreateNewSurvey(self):
-        """Opens the NewSurveyDialog, gets user input, and creates a new folder."""
-        if not self.main.rootFolderPath:
-            QtWidgets.QMessageBox.warning(self, "Warning", "Please select a root folder first!")
-            return
-    
-        # Open the new survey dialog
-        dialog = NewSurveyDialog()
-        survey_name = dialog.get_survey_name()
-        selected_import = dialog.selected_import
-        if not survey_name:
-            return
-
-        # 'Scan X/Y Ranges','Import from SEG-Y','Enter by hand'
-        if selected_import == "Import from SEG-Y":
-            
-            # ✅ Show the SEG-Y import dialog
-            SEGYImport = ImportSEGYDialog()
-
-            while True:
-                
-                if SEGYImport.exec() == QtWidgets.QDialog.DialogCode.Accepted:  # User pressed OK
-                    
-                    child_dialog = None
-
-                    mode = SEGYImport.GetAcquisitionType()
-                    
-                    # ✅ Open the child dialog and pass the SEGYImport dialog
-                    if mode == "2D Post-stack":
-                        child_dialog = TwoDimensionPostStackSEGYDialog(SEGYImport)
-                    elif mode == "3D Post-stack":
-                        child_dialog = None  # no child dialog needed for 3D post-stack
-                    else:
-                        child_dialog = None  # pre-stack flows already handled in import
-
-                    # Open the dialog and wait for the user's response
-                    if child_dialog is not None and child_dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-                        
-                        # ✅ Create the survey folder
-                        self.CreateSurveyFolder(survey_name)
-
-                        child_dialog.PassChildClassValues(SEGYImport)
-
-                        # ✅ Confirm binary import
-                        reply = QtWidgets.QMessageBox.question(
-                            self,
-                            "Confirm SEG-Y Import",
-                            "Do you wish to import SEG-Y binary?",
-                            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                            QtWidgets.QMessageBox.StandardButton.No
-                        )
-
-                        # ✅ Set the binary loading flag
-                        loadBinary = reply == QtWidgets.QMessageBox.StandardButton.Yes
-                        break  # ✅ Exit the loop since the process was completed successfully
-
-                    else:
-                        # User clicked Cancel in TwoDimensionPostStackSEGYDialog
-                        # ✅ Reopen the SEGYImport dialog
-                        continue  
-
-                else:
-                    # User clicked Cancel in SEGYImport dialog
-                    break  # Exit the loop entirely and go back to NewSurveyDialog
-
-        elif selected_import == "Enter by hand":
-            manual_dialog = ManualSurveyDialog(self)
-            if manual_dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-                values = manual_dialog.get_values()
-                metadata = {
-                    "boundary": {
-                        "x_range": [values["x_min"], values["x_max"]],
-                        "y_range": [values["y_min"], values["y_max"]],
-                        "inline_start": values["inline_start"],
-                        "xline_start": values["xline_start"],
-                        "inline_increment": values["inline_increment"],
-                        "xline_increment": values["xline_increment"],
-                        "azimuth_degrees": values["azimuth"],
-                    }
-                }
-                self.CreateSurveyFolder(survey_name, metadata=metadata)
-
-        self.surveyListView.selectionModel().currentChanged.connect(self._on_survey_selected)
-        self._on_survey_selected()
-
-    def _on_survey_selected(self, current=None, prev=None):
-        if current and current.isValid():
-            selected = current.data()
-        else:
-            selected = self.GetSelectedSurvey()
-        if not selected:
-            self.figure.clear()
-            self.canvas.draw_idle()
-            self.range_label.setText("")
-            return
-        try:
-            project = next(p for p in list_projects() if p["name"] == selected)
-        except StopIteration:
-            self.figure.clear()
-            self.canvas.draw_idle()
-            self.range_label.setText("")
-            return
-        metadata = project.get("metadata", {}).get("boundary")
-        if not metadata:
-            self.figure.clear()
-            self.canvas.draw_idle()
-            self.range_label.setText("No boundary metadata stored.")
-            return
-        x_min, x_max = metadata["x_range"]
-        y_min, y_max = metadata["y_range"]
-        width = x_max - x_min
-        height = y_max - y_min
-        center_x = (x_min + x_max) / 2.0
-        center_y = (y_min + y_max) / 2.0
-        theta = np.deg2rad(metadata.get("azimuth_degrees", 0.0))
-        cos_t, sin_t = np.cos(theta), np.sin(theta)
-        corners = [
-            (-width / 2, -height / 2),
-            (width / 2, -height / 2),
-            (width / 2, height / 2),
-            (-width / 2, height / 2),
-            (-width / 2, -height / 2),
-        ]
-        rotated = [
-            (center_x + cos_t * dx - sin_t * dy, center_y + sin_t * dx + cos_t * dy)
-            for dx, dy in corners
-        ]
-        xs = [pt[0] for pt in rotated]
-        ys = [pt[1] for pt in rotated]
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
-        ax.plot(xs, ys, color="tab:red")
-        ax.set_xlabel("X (UTM)")
-        ax.set_ylabel("Y (UTM)")
-        ax.set_title(f"{selected} Footprint")
-        ax.set_aspect("equal", adjustable="box")
-        ax.grid(True, linestyle="--", alpha=0.5)
-        self.canvas.draw_idle()
-
-        inline_start = metadata.get("inline_start")
-        xline_start = metadata.get("xline_start")
-        inline_inc = metadata.get("inline_increment")
-        xline_inc = metadata.get("xline_increment")
-        inline_end = inline_start + (height / inline_inc) if inline_start is not None and inline_inc else "?"
-        xline_end = xline_start + (width / xline_inc) if xline_start is not None and xline_inc else "?"
-
-        summary = (
-            f"X Range: {x_min:.1f} - {x_max:.1f}\n"
-            f"Y Range: {y_min:.1f} - {y_max:.1f}\n"
-            f"Inline: {inline_start} - {inline_end}\n"
-            f"Crossline: {xline_start} - {xline_end}"
-        )
-        self.range_label.setText(summary)
-
-    def UpdateSurveyList(self, select_name: str | None = None):
-        """Updates the QListView with the latest survey names and selects the requested one."""
-
-        self.model.setStringList(self.main.folder_list)  # Update model with new folder list
-        self.surveyListView.setModel(self.model)  # Refresh view
-        target_index = None
-        if select_name and select_name in self.main.folder_list:
-            row = self.main.folder_list.index(select_name)
-            target_index = self.model.index(row, 0)
-        elif self.main.folder_list:
-            target_index = self.model.index(0, 0)
-
-        if target_index is not None:
-            self.surveyListView.setCurrentIndex(target_index)
-            self._on_survey_selected(target_index)
-        else:
-            self._on_survey_selected()
-        
-    def GetSelectedSurvey(self):
-        """Returns the selected survey from the QListView when OK is clicked."""
-        selected_indexes = self.surveyListView.selectedIndexes()
-        if selected_indexes:  # Ensure something is selected
-            selected_survey = selected_indexes[0].data()  # Get the text of the selected item
-            return selected_survey
         return None

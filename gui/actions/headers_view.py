@@ -3,6 +3,17 @@ from pathlib import Path
 import pandas as pd
 from PyQt6 import QtWidgets
 
+from openseismicprocessing.constants import TRACE_HEADER_REV1
+
+
+def _label_with_bytes(name: str) -> str:
+    spec = TRACE_HEADER_REV1
+    if name in spec:
+        start, length = spec[name]
+        end = start + length - 1
+        return f"{name} (Bytes {start}-{end})"
+    return name
+
 
 class HeadersDialog(QtWidgets.QDialog):
     def __init__(self, parent, files):
@@ -45,7 +56,7 @@ def _build_headers_table(view_df: pd.DataFrame, title: str) -> QtWidgets.QWidget
     table = QtWidgets.QTableWidget()
     table.setRowCount(len(view_df))
     table.setColumnCount(len(view_df.columns))
-    table.setHorizontalHeaderLabels([str(c) for c in view_df.columns])
+    table.setHorizontalHeaderLabels([_label_with_bytes(str(c)) for c in view_df.columns])
     table.setWordWrap(False)
     # Align header font with cell font (non-bold)
     header_font = table.font()

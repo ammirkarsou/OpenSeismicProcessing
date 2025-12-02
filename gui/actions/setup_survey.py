@@ -17,7 +17,7 @@ def setup_survey(window):
         ],
         key=str.lower,
     )
-
+    
     dialog = DialogBox(window, selected_survey=window.currentSurveyName)
     if dialog.exec():
         selected = dialog.GetSelectedSurvey()

@@ -10,6 +10,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from openseismicprocessing.catalog import list_projects
+from boundary_utils import footprint_polygon
 
 
 class Viewer2D(QtWidgets.QWidget):
@@ -293,12 +294,10 @@ class Viewer2D(QtWidgets.QWidget):
         ax = self.map_fig.add_subplot(111)
         plotted = False
         x_min = x_max = y_min = y_max = None
-        if self.boundary and "x_range" in self.boundary and "y_range" in self.boundary:
-            x_min, x_max = self.boundary["x_range"]
-            y_min, y_max = self.boundary["y_range"]
-            rect_x = [x_min, x_max, x_max, x_min, x_min]
-            rect_y = [y_min, y_min, y_max, y_max, y_min]
-            ax.plot(rect_x, rect_y, color="green", linewidth=1.5, linestyle="--", label="Survey footprint")
+        poly = footprint_polygon(self.boundary)
+        if poly is not None:
+            xs, ys, x_min, x_max, y_min, y_max = poly
+            ax.plot(xs, ys, color="green", linewidth=1.5, linestyle="--", label="Survey footprint")
             plotted = True
         if subset is not None and not subset.empty:
             sx_col = self._find_col(subset, ["SourceX", "sx"])

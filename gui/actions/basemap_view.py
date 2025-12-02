@@ -7,6 +7,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from matplotlib.figure import Figure
 from openseismicprocessing.catalog import list_projects
+from boundary_utils import footprint_polygon
 
 
 def _infer_dtype(geom_path: Path, survey_root: Path | None) -> str:
@@ -188,12 +189,11 @@ class BasemapDialog(QtWidgets.QWidget):
         ax.set_ylabel("Y (m)")
         ax.set_title(f"Basemap: {self.survey_name or ''}")
         ax.grid(True, linestyle="--", alpha=0.3)
-        if self.boundary and "x_range" in self.boundary and "y_range" in self.boundary:
-            x_min, x_max = self.boundary["x_range"]
-            y_min, y_max = self.boundary["y_range"]
-            rect_x = [x_min, x_max, x_max, x_min, x_min]
-            rect_y = [y_min, y_min, y_max, y_max, y_min]
-            ax.plot(rect_x, rect_y, color="green", linewidth=1.5, linestyle="--", label="Survey footprint", zorder=1)
+        # Draw survey footprint using boundary + azimuth (if available)
+        poly = footprint_polygon(self.boundary)
+        if poly is not None:
+            xs, ys, _, _, _, _ = poly
+            ax.plot(xs, ys, color="green", linewidth=1.5, linestyle="--", label="Survey footprint", zorder=1)
             plotted = True
         if plotted:
             handles, labels = ax.get_legend_handles_labels()

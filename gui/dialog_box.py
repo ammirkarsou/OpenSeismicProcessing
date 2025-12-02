@@ -6,29 +6,34 @@ from pathlib import Path
 import numpy as np
 from PyQt6 import QtWidgets
 from PyQt6.QtCore import QStringListModel, Qt
-from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
 
 from openseismicprocessing.catalog import delete_project, ensure_project, list_projects, rename_project
 from SurveyDialogs import ImportSEGYDialog, ManualSurveyDialog, NewSurveyDialog
+from boundary_utils import footprint_polygon
 
 
 class DialogBox(QtWidgets.QDialog):
     """Survey selection/setup dialog."""
 
-    def __init__(self, main, selected_survey: str | None = None):
+    def __init__(self, main, selected_survey: str | None = None, is_new_survey = False):
         super().__init__()
+        # Store main window reference and initial selection
         self.main = main
         self.initial_selection = selected_survey
         self.setWindowTitle("Select/Setup Survey")
-        self.resize(640, 500)
-
+        self.resize(820, 520)
+        self.is_new_survey = is_new_survey
+        # Matplotlib footprint plot + summary label
         self.figure = Figure(figsize=(3, 3))
         self.canvas = FigureCanvas(self.figure)
         self.range_label = QtWidgets.QLabel()
         self.range_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.range_label.setWordWrap(True)
 
+        # Buttons for CRUD on surveys
         self.newSurveyButton = QtWidgets.QPushButton("New")
         self.deleteSurveyButton = QtWidgets.QPushButton("Delete")
         self.renameSurveyButton = QtWidgets.QPushButton("Rename")
@@ -38,6 +43,7 @@ class DialogBox(QtWidgets.QDialog):
         button_row.addWidget(self.deleteSurveyButton)
         button_row.addStretch()
 
+        # List of surveys
         self.surveyListView = QtWidgets.QListView()
         self.model = QStringListModel()
         self.model.setStringList(main.folder_list)
@@ -46,13 +52,18 @@ class DialogBox(QtWidgets.QDialog):
         left_layout = QtWidgets.QVBoxLayout()
         left_layout.addLayout(button_row)
         left_layout.addWidget(self.surveyListView)
+        # Keep left pane narrow so plot has space
+        left_container = QtWidgets.QWidget()
+        left_container.setLayout(left_layout)
+        left_container.setMaximumWidth(260)
 
+        # Plot + summary on the right
         right_layout = QtWidgets.QVBoxLayout()
         right_layout.addWidget(self.canvas, stretch=1)
         right_layout.addWidget(self.range_label)
 
         main_layout = QtWidgets.QHBoxLayout()
-        main_layout.addLayout(left_layout, stretch=1)
+        main_layout.addWidget(left_container, stretch=0)
         main_layout.addLayout(right_layout, stretch=1)
 
         button_box = QtWidgets.QDialogButtonBox(
@@ -72,6 +83,7 @@ class DialogBox(QtWidgets.QDialog):
         self.UpdateSurveyList(select_name=self.initial_selection)
 
     def DeleteSurvey(self):
+        """Delete the selected survey folder and catalog entry."""
         selected_survey = self.GetSelectedSurvey()
 
         if selected_survey is not None:
@@ -95,6 +107,7 @@ class DialogBox(QtWidgets.QDialog):
                 self.UpdateSurveyList()
 
     def RenameSurvey(self):
+        """Rename a survey folder and update the catalog."""
         selected_survey = self.GetSelectedSurvey()
         if not selected_survey:
             QtWidgets.QMessageBox.information(self, "Rename Survey", "Please select a survey first.")
@@ -133,74 +146,129 @@ class DialogBox(QtWidgets.QDialog):
         self.UpdateSurveyList(select_name=new_name)
 
     def CreateNewFolders(self):
+        """Create a new survey folder structure (Binaries/Geometry/JSON)."""
         os.mkdir(self.surveyPath)
         os.mkdir(self.surveyPath + "/Binaries/")
         os.mkdir(self.surveyPath + "/Geometry/")
         os.mkdir(self.surveyPath + "/JSON/")
 
     def CreateSurveyFolder(self, survey_name, metadata=None):
+        """Create/register a survey folder and add it to the list."""
         if survey_name:
             self.surveyPath = os.path.join(self.main.rootFolderPath, survey_name)
-            if not os.path.exists(self.surveyPath):
+            already_exists = os.path.exists(self.surveyPath)
+            if not already_exists:
                 self.CreateNewFolders()
-
+            # Register/update project regardless of pre-existing folder
+            try:
                 ensure_project(
                     name=survey_name,
                     root_path=Path(self.surveyPath),
                     description="Survey created via GUI",
                     metadata=metadata or {},
                 )
+            except Exception:
+                pass
 
-                if survey_name not in self.main.folder_list:
-                    self.main.folder_list.append(survey_name)
-                    self.main.folder_list = sorted(self.main.folder_list, key=str.lower)
+            newly_added = False
+            if survey_name not in self.main.folder_list:
+                self.main.folder_list.append(survey_name)
+                self.main.folder_list = sorted(self.main.folder_list, key=str.lower)
+                newly_added = True
 
-                self.UpdateSurveyList(select_name=survey_name)
+            self.UpdateSurveyList(select_name=survey_name)
+            if newly_added or not already_exists:
                 QtWidgets.QMessageBox.information(self, "Success", f"Survey '{survey_name}' created successfully!")
-            else:
-                QtWidgets.QMessageBox.warning(self, "Warning", "Survey with this name already exists!")
 
     def CreateNewSurvey(self):
+        """Launch New Survey flow (manual or SEG-Y import)."""
         if not self.main.rootFolderPath:
             QtWidgets.QMessageBox.warning(self, "Warning", "Please select a root folder first!")
             return
 
+        # Flag so downstream dialogs know this is a brand‑new survey (no existing boundary/metadata yet)
+        self.is_new_survey = True
+        # Ask the user for a survey name and how they want to create it (manual or SEG-Y)
         dialog = NewSurveyDialog()
         survey_name = dialog.get_survey_name()
         selected_import = dialog.selected_import
+        # User cancelled or left name blank – bail out quietly
         if not survey_name:
             return
 
         if selected_import == "Import from SEG-Y":
-            SEGYImport = ImportSEGYDialog()
+            # Build the target folder path where the survey will live
+            target_root = Path(self.main.rootFolderPath) / survey_name
+            # Launch the SEG-Y import dialog; we pass is_new_survey so it derives bounds from data
+            SEGYImport = ImportSEGYDialog(
+                boundary=None,
+                survey_root=target_root,
+                is_new_survey=self.is_new_survey,
+            )
+            # Loop to allow the user to reopen the import dialog if they cancel a child dialog
             while True:
                 if SEGYImport.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                    # For now we do not open any child dialog; keep the branches explicit for future modes
                     child_dialog = None
                     mode = SEGYImport.GetAcquisitionType()
                     if mode == "2D Post-stack":
-                        child_dialog = TwoDimensionPostStackSEGYDialog(SEGYImport)
+                        child_dialog = None
                     elif mode == "3D Post-stack":
                         child_dialog = None
                     else:
                         child_dialog = None
 
-                    if child_dialog is not None and child_dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-                        self.CreateSurveyFolder(survey_name)
-                        child_dialog.PassChildClassValues(SEGYImport)
-                        reply = QtWidgets.QMessageBox.question(
-                            self,
-                            "Confirm SEG-Y Import",
-                            "Do you wish to import SEG-Y binary?",
-                            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                            QtWidgets.QMessageBox.StandardButton.No,
-                        )
-                        loadBinary = reply == QtWidgets.QMessageBox.StandardButton.Yes
-                        break
+                    if child_dialog is not None:
+                        # If we ever add a child dialog, run it and continue the loop on cancel
+                        if child_dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                            # Collect metadata (boundary and any header choices) produced by the import dialog
+                            import_meta = {}
+                            if getattr(SEGYImport, "survey_boundary", None):
+                                import_meta["boundary"] = SEGYImport.survey_boundary.get("boundary", SEGYImport.survey_boundary)
+                            if hasattr(SEGYImport, "_selected_headers_metadata"):
+                                try:
+                                    import_meta.update(SEGYImport._selected_headers_metadata())
+                                except Exception:
+                                    pass
+                            # Create the survey folder structure and register in the catalog
+                            self.CreateSurveyFolder(survey_name, metadata=import_meta or None)
+                            # Point import dialog to the newly created survey root
+                            SEGYImport.survey_root = Path(self.surveyPath)
+                            # Pass values from import dialog to child if needed
+                            child_dialog.PassChildClassValues(SEGYImport)
+                            # Ask whether to also import the binary traces now
+                            reply = QtWidgets.QMessageBox.question(
+                                self,
+                                "Confirm SEG-Y Import",
+                                "Do you wish to import SEG-Y binary?",
+                                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                                QtWidgets.QMessageBox.StandardButton.No,
+                            )
+                            loadBinary = reply == QtWidgets.QMessageBox.StandardButton.Yes
+                            # Break out after handling the child dialog path
+                            break
+                        else:
+                            # Child dialog was cancelled – reopen the main import dialog
+                            continue
                     else:
-                        continue
+                        # No child dialog needed (current modes). Create folder and finish.
+                        import_meta = {}
+                        if getattr(SEGYImport, "survey_boundary", None):
+                            import_meta["boundary"] = SEGYImport.survey_boundary.get("boundary", SEGYImport.survey_boundary)
+                        if hasattr(SEGYImport, "_selected_headers_metadata"):
+                            try:
+                                import_meta.update(SEGYImport._selected_headers_metadata())
+                            except Exception:
+                                pass
+                        # Create the survey folder and register it; set survey_root so later import uses the folder
+                        self.CreateSurveyFolder(survey_name, metadata=import_meta or None)
+                        SEGYImport.survey_root = Path(self.surveyPath)
+                        break
                 else:
+                    # User cancelled the import dialog
                     break
         elif selected_import == "Enter by hand":
+            # Manual entry dialog for bounds and optional inline/xline info
             manual_dialog = ManualSurveyDialog(self)
             if manual_dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
                 values = manual_dialog.get_values()
@@ -221,6 +289,7 @@ class DialogBox(QtWidgets.QDialog):
         self._on_survey_selected()
 
     def _on_survey_selected(self, current=None, prev=None):
+        """Update footprint plot and summary when selection changes."""
         if current and current.isValid():
             selected = current.data()
         else:
@@ -243,27 +312,13 @@ class DialogBox(QtWidgets.QDialog):
             self.canvas.draw_idle()
             self.range_label.setText("No boundary metadata stored.")
             return
-        x_min, x_max = metadata["x_range"]
-        y_min, y_max = metadata["y_range"]
-        width = x_max - x_min
-        height = y_max - y_min
-        center_x = (x_min + x_max) / 2.0
-        center_y = (y_min + y_max) / 2.0
-        theta = np.deg2rad(metadata.get("azimuth_degrees", 0.0))
-        cos_t, sin_t = np.cos(theta), np.sin(theta)
-        corners = [
-            (-width / 2, -height / 2),
-            (width / 2, -height / 2),
-            (width / 2, height / 2),
-            (-width / 2, height / 2),
-            (-width / 2, -height / 2),
-        ]
-        rotated = [
-            (center_x + cos_t * dx - sin_t * dy, center_y + sin_t * dx + cos_t * dy)
-            for dx, dy in corners
-        ]
-        xs = [pt[0] for pt in rotated]
-        ys = [pt[1] for pt in rotated]
+        poly = footprint_polygon(metadata.get("boundary", metadata))
+        if poly is None:
+            self.figure.clear()
+            self.canvas.draw_idle()
+            self.range_label.setText("No boundary metadata stored.")
+            return
+        xs, ys, x_min, x_max, y_min, y_max = poly
         self.figure.clear()
         ax = self.figure.add_subplot(111)
         ax.plot(xs, ys, color="tab:red")
@@ -272,14 +327,17 @@ class DialogBox(QtWidgets.QDialog):
         ax.set_title(f"{selected} Footprint")
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, linestyle="--", alpha=0.5)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
         self.canvas.draw_idle()
 
-        inline_start = metadata.get("inline_start")
-        xline_start = metadata.get("xline_start")
+        inline_range = metadata.get("inline_range") or metadata.get("Inline_range")
+        xline_range = metadata.get("xline_range") or metadata.get("Xline_range")
+        inline_start = inline_range[0] if inline_range and len(inline_range) > 0 else metadata.get("inline_start")
+        xline_start = xline_range[0] if xline_range and len(xline_range) > 0 else metadata.get("xline_start")
         inline_inc = metadata.get("inline_increment")
         xline_inc = metadata.get("xline_increment")
-        inline_end = inline_start + (height / inline_inc) if inline_start is not None and inline_inc else "?"
-        xline_end = xline_start + (width / xline_inc) if xline_start is not None and xline_inc else "?"
+        inline_end = inline_range[1] if inline_range and len(inline_range) > 1 else "?"
+        xline_end = xline_range[1] if xline_range and len(xline_range) > 1 else "?"
 
         summary = (
             f"X Range: {x_min:.1f} - {x_max:.1f}\n"
