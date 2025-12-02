@@ -39,6 +39,7 @@ setup(
         "numcodecs",
         "tqdm",
         "PyQt6",
+        "vtk",
         "pyarrow",
         "fastparquet",
     ],

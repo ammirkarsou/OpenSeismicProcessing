@@ -13,5 +13,6 @@ tqdm
 platformdirs
 cupy>=12.0
 PyQt6
+vtk
 pyarrow
 fastparquet

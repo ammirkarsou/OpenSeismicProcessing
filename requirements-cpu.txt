@@ -9,5 +9,6 @@ segyio
 ipython
 platformdirs
 PyQt6
+vtk
 pyarrow
 fastparquet
